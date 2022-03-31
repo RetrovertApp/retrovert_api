@@ -6,7 +6,7 @@
 extern "C" {
 #endif
 
-typedef struct RVMetadataAPIPrivData;
+struct RVMetadataAPIPrivData;
 typedef uint64_t RVMetadataId;
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -42,22 +42,22 @@ enum RVMetadataResult {
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
 typedef struct RVMetadataAPI {
-    RVMetadataAPIPrivData* priv_data;
+    struct RVMetadataAPIPrivData* priv_data;
 
-    RVMetadataId (*create_url)(RVMetadataAPIPrivData* priv_data, const char* url);
-    void (*set_tag)(RVMetadataAPIPrivData* priv_data, RVMetadataId id, const char* tag, const char* data);
-    void (*set_tag_f64)(RVMetadataAPIPrivData* priv_data, RVMetadataId id, const char* tag, double d);
-    void (*add_subsong)(RVMetadataAPIPrivData* priv_data, RVMetadataId parent_id, int index, const char* name,
+    RVMetadataId (*create_url)(struct RVMetadataAPIPrivData* priv_data, const char* url);
+    void (*set_tag)(struct RVMetadataAPIPrivData* priv_data, RVMetadataId id, const char* tag, const char* data);
+    void (*set_tag_f64)(struct RVMetadataAPIPrivData* priv_data, RVMetadataId id, const char* tag, double d);
+    void (*add_subsong)(struct RVMetadataAPIPrivData* priv_data, RVMetadataId parent_id, int index, const char* name,
                         float length);
 
-    void (*add_sample)(RVMetadataAPIPrivData* priv_data, RVMetadataId parent_id, const char* text);
-    void (*add_instrument)(RVMetadataAPIPrivData* priv_data, RVMetadataId parent_id, const char* text);
-    int (*begin_get_all)(RVMetadataAPIPrivData* priv_data, const char* url);
-    void (*end_get_all)(RVMetadataAPIPrivData* priv_data);
-    int (*get_all_entry)(RVMetadataAPIPrivData* priv_data, int entry, const char** name, const char** data,
+    void (*add_sample)(struct RVMetadataAPIPrivData* priv_data, RVMetadataId parent_id, const char* text);
+    void (*add_instrument)(struct RVMetadataAPIPrivData* priv_data, RVMetadataId parent_id, const char* text);
+    int (*begin_get_all)(struct RVMetadataAPIPrivData* priv_data, const char* url);
+    void (*end_get_all)(struct RVMetadataAPIPrivData* priv_data);
+    int (*get_all_entry)(struct RVMetadataAPIPrivData* priv_data, int entry, const char** name, const char** data,
                          int* len_name, int* len_data);
-    int (*get_all_sample)(RVMetadataAPIPrivData* priv_data, int entry, const char** text, int* text_len);
-    int (*get_all_instrument)(RVMetadataAPIPrivData* priv_data, int entry, const char** text, int* text_len);
+    int (*get_all_sample)(struct RVMetadataAPIPrivData* priv_data, int entry, const char** text, int* text_len);
+    int (*get_all_instrument)(struct RVMetadataAPIPrivData* priv_data, int entry, const char** text, int* text_len);
 
 } RVMetadataAPI;
 

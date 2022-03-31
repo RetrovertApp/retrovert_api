@@ -6,7 +6,7 @@
 extern "C" {
 #endif
 
-typedef struct RVMessageAPIData;
+struct RVMessageAPIData;
 
 #define RV_MESSAGE_API_VERSION 1
 
@@ -15,8 +15,8 @@ typedef struct RVMessageAPIData;
 
 typedef struct RVMessageAPI {
     // Private internal data
-    RVMessageAPIData* priv_data;
-    void (*send)(RVMessageAPIData* priv_data, const unsigned char* data, int len);
+    struct RVMessageAPIData* priv_data;
+    void (*send)(struct RVMessageAPIData* priv_data, const unsigned char* data, int len);
 } RVMessageAPI;
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////

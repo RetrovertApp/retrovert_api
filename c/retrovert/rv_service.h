@@ -6,7 +6,7 @@ extern "C" {
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
-typedef struct RVServicePrivData;
+struct RVServicePrivData;
 
 struct RVLogAPI;
 struct RVSettingsAPI;
@@ -18,11 +18,11 @@ struct RVSettingsAPI;
 
 typedef struct RVServiceAPI {
     RVServicePrivData* private_data;
-    const struct RVLogAPI* (*get_log_api)(RVServicePrivData* private_data, int api_version);
-    const struct RVIoAPI* (*get_io_api)(RVServicePrivData* private_data, int api_version);
-    const struct RVMetadataAPI* (*get_metadata_api)(RVServicePrivData* private_data, int api_version);
-    const struct RVMessageAPI* (*get_message_api)(RVServicePrivData* private_data, int api_version);
-    const struct RVSettingsAPI* (*get_settings_api)(RVServicePrivData* private_data, int api_version);
+    const struct RVLogAPI* (*get_log_api)(struct RVServicePrivData* private_data, int api_version);
+    const struct RVIoAPI* (*get_io_api)(struct RVServicePrivData* private_data, int api_version);
+    const struct RVMetadataAPI* (*get_metadata_api)(struct RVServicePrivData* private_data, int api_version);
+    const struct RVMessageAPI* (*get_message_api)(struct RVServicePrivData* private_data, int api_version);
+    const struct RVSettingsAPI* (*get_settings_api)(struct RVServicePrivData* private_data, int api_version);
 } RVServiceAPI;
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////

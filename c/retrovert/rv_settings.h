@@ -162,19 +162,21 @@ typedef enum RVSettingsError {
     RVSettingsError_WrongType,
 } RVSettingsError;
 
+struct RVSPrivate;
+
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
 typedef struct RVSettingsAPI {
     void* priv_data;
 
     // Register the settings to be used for the playback plugin
-    RVSettingsError (*register_settings)(void* priv_data, const char* name, const RVSSetting* settings, int count);
+    RVSettingsError (*reg)(void* data, const char* name, const RVSSetting* settings, int count);
 
     // access settings
-    RVSettingsError (*get_string)(void* priv_data, const char* ext, const char* id, const char** value);
-    RVSettingsError (*get_int)(void* priv_data, const char* ext, const char* id, int* value);
-    RVSettingsError (*get_float)(void* priv_data, const char* ext, const char* id, float* value);
-    RVSettingsError (*get_bool)(void* priv_data, const char* ext, const char* id, bool* value);
+    RVSettingsError (*get_string)(void* data, const char* ext, const char* id, const char** value);
+    RVSettingsError (*get_int)(void* data, const char* ext, const char* id, int* value);
+    RVSettingsError (*get_float)(void* data, const char* ext, const char* id, float* value);
+    RVSettingsError (*get_bool)(void* data, const char* ext, const char* id, bool* value);
 
     // Update settings
     // RVSettingError (*set_string)(void* priv_data, int id, char* value);
@@ -191,8 +193,8 @@ typedef struct RVSettingsAPI {
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
-#define RVSettings_register_settings(api, name, settings) \
-    api->register_settings(api->priv_data, name, (RVSSetting*)&settings, rv_sizeof_array(settings))
+#define RVSettings_register(api, name, settings) \
+    api->reg(api->priv_data, name, (RVSSetting*)&settings, rv_sizeof_array(settings))
 
 #define RVSettings_get_string(api, ext, id, value) api->get_string(api->priv_data, ext, id, value)
 #define RVSettings_get_int(api, ext, id, value) api->get_int(api->priv_data, ext, id, value)

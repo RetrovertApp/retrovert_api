@@ -10,14 +10,14 @@ enum { RV_LOG_TRACE, RV_LOG_DEBUG, RV_LOG_INFO, RV_LOG_WARN, RV_LOG_ERROR, RV_LO
 
 #define RV_LOG_API_VERSION 1
 
-typedef struct RVLogAPIPrivate;
+struct RVLogAPIPrivate;
 
 typedef struct RVLogAPI {
-    RVLogAPIPrivate* api_data;
+    RVLogAPIPrivate* priv_data;
     // Set basename appended to output (useful for setting plugin name)
-    void (*log_set_base_name)(RVLogAPIPrivate* api_data, const char* base_name);
+    void (*log_set_base_name)(struct RVLogAPIPrivate* priv_data, const char* base_name);
     // Write to the log. It's recommended to use the macros bellow for eaiser usage
-    void (*log)(RVLogAPIPrivate* api_data, int level, const char* file, int line, const char* fmt, ...);
+    void (*log)(struct RVLogAPIPrivate* priv_data, int level, const char* file, int line, const char* fmt, ...);
 } RVLogAPI;
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
