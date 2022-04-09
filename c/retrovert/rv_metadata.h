@@ -11,15 +11,15 @@ typedef uint64_t RVMetadataId;
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
-enum RVMetaEncoding {
-    RVMetaEncoding_UTF8,
-    RVMetaEncoding_ShiftJS2,
-};
+enum MetaEncoding {
+    UTF8,
+    ShiftJS2,
+}
 
 enum RVMetadataResult {
-    RVMetadataResult_KeyNotFound = 0,
-    RVMetadataResult_UnableToMakeQuery = -1,
-};
+    KeyNotFound = 0,
+    UnableToMakeQuery = -1,
+}
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
