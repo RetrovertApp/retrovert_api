@@ -4,7 +4,7 @@
 
 #pragma once
 
-#include "../rv_types.h"
+#include "rv_types.h"
 
 #ifdef _cplusplus
 extern "C" {
