@@ -24,11 +24,11 @@ typedef enum RVProbeResult {
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
 typedef enum RVOutputType {
-    RVOutputType_u8 = 1,
-    RVOutputType_s16 = 2,
-    RVOutputType_s24 = 3,
-    RVOutputType_s32 = 4,
-    RVOutputType_f32 = 5,
+    RVOutputType_U8 = 1,
+    RVOutputType_S16 = 2,
+    RVOutputType_S24 = 3,
+    RVOutputType_S32 = 4,
+    RVOutputType_F32 = 5,
 } RVOutputType;
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////

@@ -29,7 +29,7 @@ typedef struct RVLog {
     struct RVLogPrivate* private_data;
     // Set basename appended to output (useful for setting plugin name)
     void (*set_base_name)(struct RVLogPrivate* self, const char* base_name);
-    // Write to the log. It's recommended to use the macros bellow for eaiser usage
+    // Write to the log. It's recommended to use the macros for eaiser usage
     void (*log)(struct RVLogPrivate* self, uint32_t level, const char* file, int line, const char* fmt, ...);
 } RVLog;
 

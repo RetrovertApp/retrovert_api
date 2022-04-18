@@ -11,3 +11,5 @@
 #else
 #define RV_EXPORT
 #endif
+
+#define RV_PLUGIN
