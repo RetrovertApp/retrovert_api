@@ -88,7 +88,7 @@ typedef struct RVPlaybackPlugin {
     // Called to see if the plugin can provide some metadata given an url
     int (*metadata)(const char* url, const RVService* services);
     // Called once for each plugin. This allows the plugin to setup an instance of the logging api
-    void (*static_init)(const RVLog* log, const RVService* services);
+    void (*static_init)(const RVService* services);
     // Called when the user has changed some settings
     RVSettingsUpdate (*settings_updated)(void* user_data, const RVSettings* settings);
 } RVPlaybackPlugin;

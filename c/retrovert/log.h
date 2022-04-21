@@ -10,6 +10,7 @@
 extern "C" {
 #endif
 
+#define RV_LOG_API_VERSION 1
 // Used for selecting which level to log at. It's recommended to use the helper macros
 typedef enum RVLogLevel {
     RVLogLevel_Trace = 0,
@@ -35,62 +36,62 @@ typedef struct RVLog {
 
 #define rv_debug(...)                                                                  \
     {                                                                                  \
-        extern RVLog* g_rv_log;                                                        \
+        extern const RVLog* g_rv_log;                                                  \
         g_rv_log->log(g_rv_log->private_data, RVLogLevel_Debug, NULL, 0, __VA_ARGS__); \
     }
 #define rvfl_debug(...)                                                                           \
     {                                                                                             \
-        extern RVLog* g_rv_log;                                                                   \
+        extern const RVLog* g_rv_log;                                                             \
         g_rv_log->log(g_rv_log->private_data, RVLogLevel_Debug, __FILE__, __LINE__, __VA_ARGS__); \
     }
 #define rv_trace(...)                                                                  \
     {                                                                                  \
-        extern RVLog* g_rv_log;                                                        \
+        extern const RVLog* g_rv_log;                                                  \
         g_rv_log->log(g_rv_log->private_data, RVLogLevel_Trace, NULL, 0, __VA_ARGS__); \
     }
 #define rvfl_trace(...)                                                                           \
     {                                                                                             \
-        extern RVLog* g_rv_log;                                                                   \
+        extern const RVLog* g_rv_log;                                                             \
         g_rv_log->log(g_rv_log->private_data, RVLogLevel_Trace, __FILE__, __LINE__, __VA_ARGS__); \
     }
 #define rv_info(...)                                                                  \
     {                                                                                 \
-        extern RVLog* g_rv_log;                                                       \
+        extern const RVLog* g_rv_log;                                                 \
         g_rv_log->log(g_rv_log->private_data, RVLogLevel_Info, NULL, 0, __VA_ARGS__); \
     }
 #define rvfl_info(...)                                                                           \
     {                                                                                            \
-        extern RVLog* g_rv_log;                                                                  \
+        extern const RVLog* g_rv_log;                                                            \
         g_rv_log->log(g_rv_log->private_data, RVLogLevel_Info, __FILE__, __LINE__, __VA_ARGS__); \
     }
 #define rv_warn(...)                                                                  \
     {                                                                                 \
-        extern RVLog* g_rv_log;                                                       \
+        extern const RVLog* g_rv_log;                                                 \
         g_rv_log->log(g_rv_log->private_data, RVLogLevel_Warn, NULL, 0, __VA_ARGS__); \
     }
 #define rvfl_warn(...)                                                                           \
     {                                                                                            \
-        extern RVLog* g_rv_log;                                                                  \
+        extern const RVLog* g_rv_log;                                                            \
         g_rv_log->log(g_rv_log->private_data, RVLogLevel_Warn, __FILE__, __LINE__, __VA_ARGS__); \
     }
 #define rv_error(...)                                                                  \
     {                                                                                  \
-        extern RVLog* g_rv_log;                                                        \
+        extern const RVLog* g_rv_log;                                                  \
         g_rv_log->log(g_rv_log->private_data, RVLogLevel_Error, NULL, 0, __VA_ARGS__); \
     }
 #define rvfl_error(...)                                                                           \
     {                                                                                             \
-        extern RVLog* g_rv_log;                                                                   \
+        extern const RVLog* g_rv_log;                                                             \
         g_rv_log->log(g_rv_log->private_data, RVLogLevel_Error, __FILE__, __LINE__, __VA_ARGS__); \
     }
 #define rv_fatal(...)                                                                  \
     {                                                                                  \
-        extern RVLog* g_rv_log;                                                        \
+        extern const RVLog* g_rv_log;                                                  \
         g_rv_log->log(g_rv_log->private_data, RVLogLevel_Fatal, NULL, 0, __VA_ARGS__); \
     }
 #define rvfl_fatal(...)                                                                           \
     {                                                                                             \
-        extern RVLog* g_rv_log;                                                                   \
+        extern const RVLog* g_rv_log;                                                             \
         g_rv_log->log(g_rv_log->private_data, RVLogLevel_Fatal, __FILE__, __LINE__, __VA_ARGS__); \
     }
 
