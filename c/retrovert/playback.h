@@ -33,19 +33,67 @@ typedef enum RVOutputType {
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
+typedef enum RVPlaybackType {
+    // Tracker-based playback type (i.e music based on pre-defined patterns)
+    RVPlaybackType_Tracker = 0,
+    // Hardware emulated means that a soundchip is being emulated and that frequencies, volumes, etc is being set.
+    RVPlaybackType_HardwareEmulated = 1,
+    // Streamed is usual for MP3/FLAC/etc formats
+    RVPlaybackType_Streamed = 2,
+} RVPlaybackType;
+
+///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
 typedef enum RVSettingsUpdate {
     RVSettingsUpdate_Default = 0,
     RVSettingsUpdate_RequireSongRestart = 1,
 } RVSettingsUpdate;
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-
+// This struct contains info on what format the host expects as output.
+// If the decoder can match the output the host has to do less converting, but isn't required.
+// The `frame_count` parameter tells you how many frames can be written to the output buffer and read from the input
+// buffer. A "frame" is one sample for each channel. For example, in a stereo stream (2 channels), one frame is 2
+// samples: one for the left, one for the right. The channel count is defined by the device config. The size in bytes of
+// an individual sample is defined by the sample format which is also specified in the device config. Multi-channel
+// audio data is always interleaved, which means the samples for each frame are stored next to each other in memory. For
+// example, in a stereo stream the first pair of samples will be the left and right samples for the first frame, the
+// second pair of samples will be the left and right samples for the second frame, etc.
 typedef struct RVReadInfo {
     uint32_t sample_rate;
-    uint16_t sample_count;
-    uint8_t channel_count;
-    uint8_t output_format;
+    uint32_t frame_count;
+    uint16_t channel_count;
+    uint16_t virtual_channel_count;
+    uint16_t output_format;
 } RVReadInfo;
+
+///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+typedef struct RVReadData {
+    // Output for channel data. If there is more than one channel it's expected the data to be interleaved.
+    void* channels_output;
+    // Output for virtual channels. This is mainly for data visualzation, but can also be used if the user
+    // wants to render out a song with all channels separated. This value is null and info.virtual_channel_count
+    // is zero when this data shouldn't be filled in. If the decoder doesn't support this virtual_chann_count should
+    // be set to zero when returing the read_info from [PlaybackPlugin::read_data]
+    void* virtual_channel_output;
+    // Max number of bytes to write to the channels_output. Notice it's fine to write less as long as the correct amount
+    uint32_t channels_output_max_bytes_size;
+    // Max number of bytes to write to the channels_output. Notice it's fine to write less as long as the correct amount
+    uint32_t virtual_channels_output_max_bytes_size;
+    RVReadInfo info;
+} RVReadData;
+
+///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+typedef struct RVPlaybackInfo {
+    // These are the number of "virtual" channels used by the song. In tracker music these would be
+    // the total number of channels. If the format/plugin doesn't support retriving individual channels
+    // then this number should be set to zero
+    uint32_t virtual_channel_count;
+    // Playback type
+    RVPlaybackType playback_type;
+} RVPlaybackInfo;
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
@@ -77,12 +125,12 @@ typedef struct RVPlaybackPlugin {
     // Opens a buffer to be ready for playback. Buffer may be a file/archived/file or a file or a network resource.
     // Use the RVFileAPI that can be optained from services to load the data
     int (*open)(void* user_data, const char* url, uint32_t subsong, const RVSettings* settings);
-    // Closes the file buffer that was opend in open. Notice that the plugin isn't detroyed at this but but is
+    // Closes the file buffer that was opened in open. Notice that the plugin isn't detroyed at this but but is
     // here for closing an open file/stream/etc
     void (*close)(void* user_data);
     // Called when sample data is requested from the host
     // The plugin is allowed to return as many samples as it want's as long as it doesn't go above max sample count
-    RVReadInfo (*read_data)(void* user_data, void* dest, uint32_t max_output_bytes, uint32_t native_sample_rate);
+    RVReadInfo (*read_data)(void* user_data, RVReadData dest);
     // Called requesting a new location in the data
     int64_t (*seek)(void* user_data, int64_t ms);
     // Called to see if the plugin can provide some metadata given an url

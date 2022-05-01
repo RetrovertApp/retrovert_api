@@ -204,6 +204,10 @@ typedef struct RVSettings {
             rv_sizeof_array(ranges)                          \
         }                                                    \
     }
+#define RVSIntValue_DescRangeLen(id, name, desc, value, ranges, len)                                              \
+    {                                                                                                             \
+        .int_fixed_value = { id, name, desc, RVS_INTEGER_RANGE_TYPE, value, (RVSIntegerRangeValue*)&ranges, len } \
+    }
 #define RVSStringValue_DescRange(id, name, desc, value, ranges) \
     {                                                           \
         .string_fixed_value = {                                 \
