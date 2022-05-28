@@ -32,6 +32,20 @@ typedef enum RVOutputType {
 } RVOutputType;
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+// Sets status of the data returned in the ReadInfo
+typedef enum RVReadStatus {
+    // This is set by default when the host requests data. Decoders are expected to set any of the bellow statuses
+    RVReadStatus_DecodingRequest = 0,
+    // Decoding of frames where ok
+    RVReadStatus_Ok = 1,
+    // Frames where decoded and that there are no more data left (such at the end of a song)
+    RVReadStatus_Finished = 2,
+    // Something went wrong when decoding the frames. The playback/decoder should use the logging system to
+    // report more details on the actual error
+    RVReadStatus_Error = 3,
+} RVReadStatus;
+
+///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
 typedef enum RVPlaybackType {
     // Tracker-based playback type (i.e music based on pre-defined patterns)
@@ -62,9 +76,10 @@ typedef enum RVSettingsUpdate {
 typedef struct RVReadInfo {
     uint32_t sample_rate;
     uint32_t frame_count;
-    uint16_t channel_count;
+    RVReadStatus status;
     uint16_t virtual_channel_count;
-    uint16_t output_format;
+    uint8_t channel_count;
+    uint8_t output_format;
 } RVReadInfo;
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////

@@ -20,8 +20,9 @@ extern "C" {
 typedef enum RVSettingsResult {
     RVSettingsResult_Ok = 0,
     RVSettingsResult_NotFound = 1,
-    RVSettingsResult_DuplicatedId = 2,
-    RVSettingsResult_WrongType = 3,
+    RVSettingsResult_UnknownId = 2,
+    RVSettingsResult_DuplicatedId = 3,
+    RVSettingsResult_WrongType = 4,
 } RVSettingsResult;
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -116,7 +117,7 @@ typedef struct RVSIntResult {
 
 typedef struct RVSFloatResult {
     RVSettingsResult result;
-    int value;
+    float value;
 } RVSFloatResult;
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -150,23 +151,25 @@ struct RVSettingsPrivate;
 
 typedef struct RVSettings {
     struct RVSettingsPrivate* private_data;
-    // Register the settings to be used for the playback plugin
-    RVSettingsResult (*reg)(struct RVSettingsPrivate* self, const char* name, RVSetting* settings,
+    // Register the settings to be used for the playback plugin. The id has to be unique otherwise SettingsResult will
+    // report DuplicateId
+    RVSettingsResult (*reg)(struct RVSettingsPrivate* self, const char* id, RVSetting* settings,
                             uint64_t settings_size);
-    // access settings
-    RVSStringResult (*get_string)(struct RVSettingsPrivate* self, const char* ext, const char* id);
-    RVSIntResult (*get_int)(struct RVSettingsPrivate* self, const char* ext, const char* id);
-    RVSFloatResult (*get_float)(struct RVSettingsPrivate* self, const char* ext, const char* id);
-    RVSBoolResult (*get_bool)(struct RVSettingsPrivate* self, const char* ext, const char* id);
+    // access settings. The reg_id has to match with the id when calling [Settings::reg]. ext is for apply the sitting
+    // on a per file extension basis. Use "" for global
+    RVSStringResult (*get_string)(struct RVSettingsPrivate* self, const char* reg_id, const char* ext, const char* id);
+    RVSIntResult (*get_int)(struct RVSettingsPrivate* self, const char* reg_id, const char* ext, const char* id);
+    RVSFloatResult (*get_float)(struct RVSettingsPrivate* self, const char* reg_id, const char* ext, const char* id);
+    RVSBoolResult (*get_bool)(struct RVSettingsPrivate* self, const char* reg_id, const char* ext, const char* id);
 } RVSettings;
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
-#define RVSettings_reg(self, name, settings, settings_size) self->reg(self->private_data, name, settings, settings_size)
-#define RVSettings_get_string(self, ext, id) self->get_string(self->private_data, ext, id)
-#define RVSettings_get_int(self, ext, id) self->get_int(self->private_data, ext, id)
-#define RVSettings_get_float(self, ext, id) self->get_float(self->private_data, ext, id)
-#define RVSettings_get_bool(self, ext, id) self->get_bool(self->private_data, ext, id)
+#define RVSettings_reg(self, id, settings, settings_size) self->reg(self->private_data, id, settings, settings_size)
+#define RVSettings_get_string(self, reg_id, ext, id) self->get_string(self->private_data, reg_id, ext, id)
+#define RVSettings_get_int(self, reg_id, ext, id) self->get_int(self->private_data, reg_id, ext, id)
+#define RVSettings_get_float(self, reg_id, ext, id) self->get_float(self->private_data, reg_id, ext, id)
+#define RVSettings_get_bool(self, reg_id, ext, id) self->get_bool(self->private_data, reg_id, ext, id)
 
 #define RVSettings_register_array(api, name, settings) \
     api->reg(api->private_data, name, (RVSetting*)&settings, rv_sizeof_array(settings))
