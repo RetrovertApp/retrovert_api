@@ -22,19 +22,9 @@ typedef enum RVProbeResult {
 } RVProbeResult;
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-
-typedef enum RVOutputType {
-    RVOutputType_U8 = 1,
-    RVOutputType_S16 = 2,
-    RVOutputType_S24 = 3,
-    RVOutputType_S32 = 4,
-    RVOutputType_F32 = 5,
-} RVOutputType;
-
-///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 // Sets status of the data returned in the ReadInfo
 typedef enum RVReadStatus {
-    // This is set by default when the host requests data. Decoders are expected to set any of the bellow statuses
+    // This is set by default when the host requests data. Decoders are expected to set any of the below statuses
     RVReadStatus_DecodingRequest = 0,
     // Decoding of frames where ok
     RVReadStatus_Ok = 1,
@@ -55,13 +45,6 @@ typedef enum RVPlaybackType {
     // Streamed is usual for MP3/FLAC/etc formats
     RVPlaybackType_Streamed = 2,
 } RVPlaybackType;
-
-///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-
-typedef enum RVSettingsUpdate {
-    RVSettingsUpdate_Default = 0,
-    RVSettingsUpdate_RequireSongRestart = 1,
-} RVSettingsUpdate;
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 // This struct contains info on what format the host expects as output.

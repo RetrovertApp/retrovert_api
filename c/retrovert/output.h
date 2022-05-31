@@ -10,20 +10,10 @@
 extern "C" {
 #endif
 
+#include "audio_format.h"
 #include "service.h"
 #include "settings.h"
 #define RV_OUTPUT_PLUGIN_API_VERSION 1
-
-typedef enum RVInputType {
-    RVInputType_Unknown = 0,
-    RVInputType_U8 = 1,
-    RVInputType_S16 = 2,
-    RVInputType_S24 = 3,
-    RVInputType_S32 = 4,
-    RVInputType_F32 = 5,
-} RVInputType;
-
-///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
 typedef struct RVWriteInfo {
     uint32_t sample_rate;
@@ -44,8 +34,7 @@ typedef struct RVPlaybackCallback {
     // buffer.
     //  A "frame" is one sample for each channel. For example, in a stereo stream (2 channels), one frame is 2
     //  samples: one for the left, one for the right.
-    void (*callback)(void* user_data, void* data, uint32_t sample_rate, uint32_t channels, uint32_t format,
-                     uint32_t frames);
+    void (*callback)(void* user_data, void* data, RVAudioFormat format, uint32_t frames);
 } RVPlaybackCallback;
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
