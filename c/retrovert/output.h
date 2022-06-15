@@ -27,14 +27,11 @@ typedef struct RVWriteInfo {
 typedef struct RVPlaybackCallback {
     void* user_data;
     // Starts playback of the data.
-    // `sample_rate` how many samples per seconds to generate. This is usually 44100 or 48000
-    // `channels` number of channels to produce data to (usually 2)
-    // `format` refers to the InputType (usually S16 or F32)
-    // `frame_count` parameter tells you how many frames can be written to the output buffer and read from the input
-    // buffer.
+    // `format` describes the out that the callback is supposed to generate
+    // `frames` parameter tells you how many frames can be written to the output buffer and read from the input buffer.
     //  A "frame" is one sample for each channel. For example, in a stereo stream (2 channels), one frame is 2
     //  samples: one for the left, one for the right.
-    void (*callback)(void* user_data, void* data, RVAudioFormat format, uint32_t frames);
+    uint32_t (*callback)(void* user_data, void* data, RVAudioFormat format, uint32_t frames);
 } RVPlaybackCallback;
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////

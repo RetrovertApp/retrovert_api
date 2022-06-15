@@ -10,6 +10,7 @@
 extern "C" {
 #endif
 
+#include "audio_format.h"
 #include "log.h"
 #include "service.h"
 #include "settings.h"
@@ -57,12 +58,10 @@ typedef enum RVPlaybackType {
 // example, in a stereo stream the first pair of samples will be the left and right samples for the first frame, the
 // second pair of samples will be the left and right samples for the second frame, etc.
 typedef struct RVReadInfo {
-    uint32_t sample_rate;
+    RVAudioFormat format;
     uint32_t frame_count;
     RVReadStatus status;
     uint16_t virtual_channel_count;
-    uint8_t channel_count;
-    uint8_t output_format;
 } RVReadInfo;
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -123,6 +122,9 @@ typedef struct RVPlaybackPlugin {
     // Opens a buffer to be ready for playback. Buffer may be a file/archived/file or a file or a network resource.
     // Use the RVFileAPI that can be optained from services to load the data
     int (*open)(void* user_data, const char* url, uint32_t subsong, const RVSettings* settings);
+    // Opens a memory buffer for playback
+    int (*open_from_memory)(void* user_data, uint8_t* data, uint64_t data_size, uint32_t subsong,
+                            const RVSettings* settings);
     // Closes the file buffer that was opened in open. Notice that the plugin isn't detroyed at this but but is
     // here for closing an open file/stream/etc
     void (*close)(void* user_data);
