@@ -122,9 +122,6 @@ typedef struct RVPlaybackPlugin {
     // Opens a buffer to be ready for playback. Buffer may be a file/archived/file or a file or a network resource.
     // Use the RVFileAPI that can be optained from services to load the data
     int (*open)(void* user_data, const char* url, uint32_t subsong, const RVSettings* settings);
-    // Opens a memory buffer for playback
-    int (*open_from_memory)(void* user_data, uint8_t* data, uint64_t data_size, uint32_t subsong,
-                            const RVSettings* settings);
     // Closes the file buffer that was opened in open. Notice that the plugin isn't detroyed at this but but is
     // here for closing an open file/stream/etc
     void (*close)(void* user_data);
