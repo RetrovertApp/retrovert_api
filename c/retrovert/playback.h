@@ -121,7 +121,7 @@ typedef struct RVPlaybackPlugin {
     void (*event)(void* user_data, uint8_t* data, uint64_t data_size);
     // Opens a buffer to be ready for playback. Buffer may be a file/archived/file or a file or a network resource.
     // Use the RVFileAPI that can be optained from services to load the data
-    int (*open)(void* user_data, const char* url, uint32_t subsong, const RVSettings* settings);
+    int (*open)(void* user_data, const char* url, uint32_t subsong, const RVService* services);
     // Closes the file buffer that was opened in open. Notice that the plugin isn't detroyed at this but but is
     // here for closing an open file/stream/etc
     void (*close)(void* user_data);
@@ -135,7 +135,7 @@ typedef struct RVPlaybackPlugin {
     // Called once for each plugin. This allows the plugin to setup an instance of the logging api
     void (*static_init)(const RVService* services);
     // Called when the user has changed some settings
-    RVSettingsUpdate (*settings_updated)(void* user_data, const RVSettings* settings);
+    RVSettingsUpdate (*settings_updated)(void* user_data, const RVService* services);
 } RVPlaybackPlugin;
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////

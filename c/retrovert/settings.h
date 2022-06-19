@@ -38,7 +38,7 @@ typedef struct RVSBase {
     const char* widget_id;
     const char* name;
     const char* desc;
-    int widget_type;
+    uint64_t widget_type;
 } RVSBase;
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -47,7 +47,7 @@ typedef struct RVSFloat {
     const char* widget_id;
     const char* name;
     const char* desc;
-    int widget_type;
+    uint64_t widget_type;
     float value;
     float start_range;
     float end_range;
@@ -59,7 +59,7 @@ typedef struct RVSInteger {
     const char* widget_id;
     const char* name;
     const char* desc;
-    int widget_type;
+    uint64_t widget_type;
     int value;
     int start_range;
     int end_range;
@@ -71,7 +71,7 @@ typedef struct RVSBool {
     const char* widget_id;
     const char* name;
     const char* desc;
-    int widget_type;
+    uint64_t widget_type;
     bool value;
 } RVSBool;
 
@@ -95,7 +95,7 @@ typedef struct RVSIntegerFixedRange {
     const char* widget_id;
     const char* name;
     const char* desc;
-    int widget_type;
+    uint64_t widget_type;
     int value;
     RVSIntegerRangeValue* values;
     uint64_t values_size;
@@ -107,7 +107,7 @@ typedef struct RVSStringFixedRange {
     const char* widget_id;
     const char* name;
     const char* desc;
-    int widget_type;
+    uint64_t widget_type;
     const char* value;
     RVSStringRangeValue* values;
     uint64_t values_size;
