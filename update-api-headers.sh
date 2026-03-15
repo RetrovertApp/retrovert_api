@@ -1,5 +1,5 @@
 #!/bin/bash
-# Update vendored API headers and cmake helpers in all local playback plugin repos.
+# Update vendored API headers, cmake helpers, and CI workflow in all local playback plugin repos.
 # Run from the directory containing retrovert_api and playback-* repos.
 
 set -e
@@ -8,6 +8,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PARENT_DIR="$(dirname "$SCRIPT_DIR")"
 API_INCLUDE="$SCRIPT_DIR/include/retrovert"
 API_CMAKE="$SCRIPT_DIR/cmake"
+API_CI="$SCRIPT_DIR/ci"
 
 if [ ! -d "$API_INCLUDE" ]; then
     echo "Error: $API_INCLUDE not found"
@@ -27,6 +28,12 @@ for dir in "$PARENT_DIR"/playback-*/; do
     if [ -d "$dir/cmake" ]; then
         cp "$API_CMAKE"/*.cmake "$dir/cmake/"
         echo "Updated cmake:   $(basename "$dir")"
+    fi
+
+    if [ -d "$API_CI" ]; then
+        mkdir -p "$dir/.github/workflows"
+        cp "$API_CI"/*.yml "$dir/.github/workflows/"
+        echo "Updated CI:      $(basename "$dir")"
     fi
 done
 
