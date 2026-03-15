@@ -10,7 +10,7 @@
 #ifdef _WIN32
 #define RV_EXPORT __declspec(dllexport)
 #else
-#define RV_EXPORT
+#define RV_EXPORT __attribute__((visibility("default")))
 #endif
 
 #define RV_PLUGIN
