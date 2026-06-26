@@ -1,0 +1,30 @@
+#[module(retrovert)]
+
+extern opaque RVService
+extern opaque RVSettings
+
+enum ResampleSettingsUpdate {
+    Default = 0,
+    RequireRestart = 1,
+}
+
+#[attributes(Copy)]
+struct ConvertConfig {
+    input: AudioFormat,
+    output: AudioFormat,
+}
+
+struct ResamplePlugin {
+    api_version: u64,
+    name: *const char,
+    version: *const char,
+    library_version: *const char,
+    create(services: *const RVService) -> *void,
+    destroy(user_data: *void) -> i32,
+    set_config(user_data: *void, format: *const ConvertConfig),
+    convert(user_data: *void, output_data: *void, input_data: *void, input_frame_count: u32) -> u32,
+    get_expected_output_frame_count(user_data: *void, frame_count: u32) -> u32,
+    get_required_input_frame_count(user_data: *void, frame_count: u32) -> u32,
+    static_init(services: *const RVService),
+    settings_updated(user_data: *void, settings: *const RVSettings) -> ResampleSettingsUpdate,
+}

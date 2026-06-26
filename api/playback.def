@@ -1,0 +1,72 @@
+#[module(retrovert)]
+
+extern opaque RVService
+extern opaque RVTrackerInfo
+extern opaque RVChannelInfo
+
+enum ProbeResult {
+    Supported = 0,
+    Unsupported = 1,
+    Unsure = 2,
+}
+
+enum ReadStatus {
+    DecodingRequest = 0,
+    Ok = 1,
+    Finished = 2,
+    Error = 3,
+}
+
+enum SettingsUpdate {
+    Default = 0,
+    RequireRestart = 1,
+}
+
+#[attributes(Copy)]
+struct ReadInfo {
+    format: AudioFormat,
+    frame_count: u32,
+    status: ReadStatus,
+}
+
+#[attributes(Copy)]
+struct ReadData {
+    channels_output: *void,
+    channels_output_max_bytes_size: u32,
+    info: ReadInfo,
+}
+
+#[attributes(Copy)]
+struct PatternCell {
+    note: u8,
+    instrument: u8,
+    volume: u8,
+    effect: u8,
+    effect_param: u8,
+    dest_channel: u8,
+}
+
+struct PlaybackPlugin {
+    api_version: u64,
+    name: *const char,
+    version: *const char,
+    library_version: *const char,
+    probe_can_play(data: *u8, data_size: u64, filename: *const char, total_size: u64) -> ProbeResult,
+    supported_extensions() -> *const char,
+    create(services: *const RVService) -> *void,
+    destroy(user_data: *void) -> i32,
+    event(user_data: *void, data: *u8, data_size: u64),
+    open(user_data: *void, url: *const char, subsong: u32, services: *const RVService) -> i32,
+    close(user_data: *void),
+    read_data(user_data: *void, dest: ReadData) -> ReadInfo,
+    seek(user_data: *void, ms: i64) -> i64,
+    metadata(url: *const char, services: *const RVService) -> i32,
+    static_init(services: *const RVService),
+    settings_updated(user_data: *void, services: *const RVService) -> SettingsUpdate,
+    get_tracker_info(user_data: *void, info: *RVTrackerInfo) -> i32,
+    get_pattern_cell(user_data: *void, pattern: i32, row: i32, channel: i32, cell: *PatternCell) -> i32,
+    get_pattern_num_rows(user_data: *void, pattern: i32) -> i32,
+    get_scope_data(user_data: *void, channel: i32, buffer: *f32, num_samples: u32) -> u32,
+    static_destroy(),
+    get_scope_channel_names(user_data: *void, names: *const *const char, max_channels: u32) -> u32,
+}

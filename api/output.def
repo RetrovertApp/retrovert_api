@@ -1,0 +1,36 @@
+#[module(retrovert)]
+
+extern opaque RVService
+
+#[attributes(Copy)]
+struct WriteInfo {
+    sample_rate: u32,
+    sample_count: u16,
+    channel_count: u8,
+    output_format: u8,
+}
+
+#[attributes(Copy)]
+struct PlaybackCallback {
+    user_data: *void,
+    callback(user_data: *void, data: *void, format: AudioFormat, frames: u32) -> u32,
+}
+
+#[attributes(Copy)]
+struct OutputTargets {
+    names: *const *const char,
+    names_size: u64,
+}
+
+struct OutputPlugin {
+    api_version: u64,
+    name: *const char,
+    version: *const char,
+    library_version: *const char,
+    create(services: *const RVService) -> *void,
+    destroy(user_data: *void) -> i32,
+    output_targets_info(user_data: *void) -> OutputTargets,
+    start(user_data: *void, callback: *PlaybackCallback),
+    stop(user_data: *void),
+    static_init(services: *const RVService),
+}
