@@ -18,7 +18,7 @@ struct PlaybackCallback {
 
 #[attributes(Copy)]
 struct OutputTargets {
-    names: *const *const char,
+    names: *void,
     names_size: u64,
 }
 

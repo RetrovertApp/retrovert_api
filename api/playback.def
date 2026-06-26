@@ -68,5 +68,5 @@ struct PlaybackPlugin {
     get_pattern_num_rows(user_data: *void, pattern: i32) -> i32,
     get_scope_data(user_data: *void, channel: i32, buffer: *f32, num_samples: u32) -> u32,
     static_destroy(),
-    get_scope_channel_names(user_data: *void, names: *const *const char, max_channels: u32) -> u32,
+    get_scope_channel_names(user_data: *void, names: *void, max_channels: u32) -> u32,
 }
