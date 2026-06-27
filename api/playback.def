@@ -1,8 +1,8 @@
 #[module(retrovert)]
 
+const RV_PLAYBACK_PLUGIN_API_VERSION = 2
+
 extern opaque RVService
-extern opaque RVTrackerInfo
-extern opaque RVChannelInfo
 
 enum ProbeResult {
     Supported = 0,
@@ -22,6 +22,30 @@ enum SettingsUpdate {
     RequireRestart = 1,
 }
 
+#[attributes(bitflags)]
+enum VizCaps {
+    PatternCells = 1,
+    Scope = 2,
+    Vu = 4,
+    WholeSongKnown = 8,
+    SeekablePreview = 16,
+    FutureKnown = 32,
+}
+
+enum ScrollMode {
+    Synchronized = 0,
+    PerChannel = 1,
+}
+
+enum ColumnKind {
+    Note = 0,
+    Instrument = 1,
+    Volume = 2,
+    Effect = 3,
+    Param = 4,
+    Custom = 5,
+}
+
 #[attributes(Copy)]
 struct ReadInfo {
     format: AudioFormat,
@@ -37,13 +61,40 @@ struct ReadData {
 }
 
 #[attributes(Copy)]
-struct PatternCell {
-    note: u8,
-    instrument: u8,
-    volume: u8,
-    effect: u8,
-    effect_param: u8,
-    dest_channel: u8,
+struct VizStructure {
+    caps: u32,
+    scroll_mode: ScrollMode,
+    pattern_channel_count: u32,
+    scope_channel_count: u32,
+    column_count: u32,
+}
+
+#[attributes(Copy)]
+struct ColumnDesc {
+    label: [u8; 16],
+    char_width: u8,
+    kind: ColumnKind,
+}
+
+#[attributes(Copy)]
+struct ChannelDesc {
+    name: [u8; 24],
+    scope_width: u8,
+}
+
+#[attributes(Copy)]
+struct VizPosition {
+    order: u32,
+    pattern: u32,
+    row: u32,
+    window_lo: u32,
+    window_hi: u32,
+}
+
+#[attributes(Copy)]
+struct Cell {
+    raw: u32,
+    text: [u8; 16],
 }
 
 struct PlaybackPlugin {
@@ -63,10 +114,16 @@ struct PlaybackPlugin {
     metadata(url: *const char, services: *const RVService) -> i32,
     static_init(services: *const RVService),
     settings_updated(user_data: *void, services: *const RVService) -> SettingsUpdate,
-    get_tracker_info(user_data: *void, info: *RVTrackerInfo) -> i32,
-    get_pattern_cell(user_data: *void, pattern: i32, row: i32, channel: i32, cell: *PatternCell) -> i32,
-    get_pattern_num_rows(user_data: *void, pattern: i32) -> i32,
-    get_scope_data(user_data: *void, channel: i32, buffer: *f32, num_samples: u32) -> u32,
     static_destroy(),
-    get_scope_channel_names(user_data: *void, names: *void, max_channels: u32) -> u32,
+
+    get_structure(user_data: *void, out: *VizStructure) -> bool,
+    get_columns(user_data: *void, out: *ColumnDesc, cap: u32) -> u32,
+    get_pattern_channels(user_data: *void, out: *ChannelDesc, cap: u32) -> u32,
+    get_scope_channels(user_data: *void, out: *ChannelDesc, cap: u32) -> u32,
+    get_position(user_data: *void, out: *VizPosition) -> bool,
+    get_channel_rows(user_data: *void, out: *u32, cap: u32) -> u32,
+    get_cells(user_data: *void, channel: i32, row_lo: u32, row_hi: u32, out: *Cell, cap: u32) -> u32,
+    set_scope_enabled(user_data: *void, on: bool),
+    get_scope_samples(user_data: *void, channel: i32, out: *f32, cap: u32) -> u32,
+    get_vu(user_data: *void, out: *f32, cap: u32) -> u32,
 }
