@@ -179,6 +179,12 @@ impl MetadataHandle {
         let next = TrackMetadata::new(RecordId(record.id.0.wrapping_add(1)));
         core::mem::replace(&mut *record, next).finish()
     }
+
+    /// Throws away what has accumulated, so a call that failed part-way leaves nothing
+    /// for the next one to pick up.
+    pub fn discard(&self) {
+        drop(self.take());
+    }
 }
 
 struct Decoded {

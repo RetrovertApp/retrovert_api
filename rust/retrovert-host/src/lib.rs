@@ -5,3 +5,4 @@ mod c_fixture;
 pub mod ffi;
 pub mod loader;
 pub mod service;
+pub mod session;
