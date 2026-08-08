@@ -1,0 +1,10 @@
+[workspace]
+resolver = "2"
+members = ["retrovert-host", "abi-parity"]
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[workspace.lints.clippy]
+undocumented_unsafe_blocks = "deny"
+missing_safety_doc = "deny"

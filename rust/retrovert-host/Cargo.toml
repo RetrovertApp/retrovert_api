@@ -1,0 +1,11 @@
+[package]
+name = "retrovert-host"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Host-side Rust bindings for the Retrovert plugin ABI"
+
+[dependencies]
+
+[lints]
+workspace = true

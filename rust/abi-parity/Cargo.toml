@@ -1,0 +1,16 @@
+[package]
+name = "abi-parity"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Layout parity gate between retrovert-host's mirror and the C headers"
+publish = false
+
+[dependencies]
+retrovert-host = { path = "../retrovert-host" }
+
+[build-dependencies]
+bindgen = "0.72"
+
+[lints]
+workspace = true
