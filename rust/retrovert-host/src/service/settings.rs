@@ -8,7 +8,7 @@ use core::ffi::{c_char, c_void};
 use core::ptr;
 use std::collections::HashMap;
 use std::ffi::CString;
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex};
 
 use crate::ffi::settings::{
     RVSBase, RVSBool, RVSBoolResult, RVSFloat, RVSFloatResult, RVSIntResult, RVSInteger,
@@ -17,7 +17,7 @@ use crate::ffi::settings::{
     RVS_INTEGER_RANGE_TYPE, RVS_INTEGER_TYPE, RVS_STRING_RANGE_TYPE,
 };
 use crate::service::log::{Log, LogLevel};
-use crate::service::{context, guard, plugin_str};
+use crate::service::{context, guard, lock, plugin_str};
 
 /// One entry of a fixed-range setting: a display name for a value.
 #[derive(Debug, Clone, PartialEq)]
@@ -222,10 +222,6 @@ fn nul_free(value: &Value) -> bool {
         Value::Str(text) => !text.as_bytes().contains(&0),
         _ => true,
     }
-}
-
-fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 /// One plugin's settings: the schemas it registered, plus per-extension overrides.

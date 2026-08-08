@@ -6,10 +6,16 @@
 
 mod io;
 mod log;
+mod metadata;
 mod settings;
 
 pub use io::{Io, StdFsIo};
 pub use log::{retrovert_host_log_write, Log, LogCrate, LogLevel};
+pub use metadata::{
+    MetadataHandle, MetadataSubsong, MetadataTag, MetadataText, MetadataTruncation, MetadataValue,
+    RecordId, SubsongCount, TrackMetadata, NAME_COUNT_LIMIT, NAME_LIMIT, SUBSONG_COUNT_LIMIT,
+    TAG_COUNT_LIMIT, TAG_KEY_LIMIT, TAG_VALUE_LIMIT, URL_LIMIT,
+};
 pub use settings::{
     Choice, MemorySettingsStore, Setting, SettingSchema, SettingsError, SettingsHandle,
     SettingsStore, SettingsUpdate, StoredValue, Value,
@@ -20,17 +26,22 @@ use core::panic::AssertUnwindSafe;
 use core::ptr;
 use std::borrow::Cow;
 use std::panic::catch_unwind;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use crate::ffi::io::{RVIo, RV_IO_API_VERSION};
 use crate::ffi::log::{RVLog, RVLogFn, RV_LOG_API_VERSION};
-use crate::ffi::metadata::RVMetadata;
+use crate::ffi::metadata::{RVMetadata, RV_METADATA_API_VERSION};
 use crate::ffi::service::RVService;
 use crate::ffi::settings::{RVSettings, RV_SETTINGS_API_VERSION};
 
 /// Runs a vtable callback, turning a panic into `fallback`; unwinding into C is undefined.
 fn guard<R>(fallback: R, body: impl FnOnce() -> R) -> R {
     catch_unwind(AssertUnwindSafe(body)).unwrap_or(fallback)
+}
+
+/// A poisoned lock still holds the state a plugin pushed; losing it would be worse.
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 /// Decodes a string a plugin passed us. Invalid UTF-8 is replaced rather than rejected.
@@ -63,10 +74,12 @@ unsafe fn context<'a>(private_data: *mut c_void) -> &'a ServiceContext {
 struct ServiceContext {
     io_vtable: RVIo,
     log_vtable: RVLog,
+    metadata_vtable: RVMetadata,
     settings_vtable: RVSettings,
     service: RVService,
     io: Box<dyn Io>,
     log: Arc<dyn Log>,
+    metadata: MetadataHandle,
     settings: SettingsHandle,
 }
 
@@ -77,6 +90,7 @@ struct ServiceContext {
 /// that was given them.
 pub struct ServiceHost {
     ctx: *mut ServiceContext,
+    metadata: MetadataHandle,
     settings: SettingsHandle,
 }
 
@@ -97,6 +111,7 @@ impl Default for ServiceHost {
 impl ServiceHost {
     pub fn new(io: Box<dyn Io>, log: Arc<dyn Log>, store: Box<dyn SettingsStore>) -> Self {
         let settings = SettingsHandle::new(store, Arc::clone(&log));
+        let metadata = MetadataHandle::new();
         let ctx = Box::into_raw(Box::new(ServiceContext {
             io_vtable: RVIo {
                 private_data: ptr::null_mut(),
@@ -107,6 +122,15 @@ impl ServiceHost {
             log_vtable: RVLog {
                 private_data: ptr::null_mut(),
                 log: Some(log::retrovert_host_log_shim as RVLogFn),
+            },
+            metadata_vtable: RVMetadata {
+                private_data: ptr::null_mut(),
+                create_url: Some(metadata::create_url),
+                set_tag: Some(metadata::set_tag),
+                set_tag_f64: Some(metadata::set_tag_f64),
+                add_subsong: Some(metadata::add_subsong),
+                add_sample: Some(metadata::add_sample),
+                add_instrument: Some(metadata::add_instrument),
             },
             settings_vtable: RVSettings {
                 private_data: ptr::null_mut(),
@@ -125,6 +149,7 @@ impl ServiceHost {
             },
             io,
             log,
+            metadata: metadata.clone(),
             settings: settings.clone(),
         }));
 
@@ -133,11 +158,21 @@ impl ServiceHost {
         unsafe {
             (*ctx).io_vtable.private_data = ctx.cast();
             (*ctx).log_vtable.private_data = ctx.cast();
+            (*ctx).metadata_vtable.private_data = ctx.cast();
             (*ctx).settings_vtable.private_data = ctx.cast();
             (*ctx).service.private_data = ctx.cast();
         }
 
-        Self { ctx, settings }
+        Self {
+            ctx,
+            metadata,
+            settings,
+        }
+    }
+
+    /// Take what the plugins reported about the song they opened. Cloneable and shared.
+    pub fn metadata(&self) -> MetadataHandle {
+        self.metadata.clone()
     }
 
     /// Enumerate, read and write plugin settings. Cloneable and shared with the plugins.
@@ -185,17 +220,20 @@ unsafe extern "C" fn get_log(private_data: *mut c_void, api_version: c_int) -> *
     })
 }
 
-/// The metadata service has no host trait and no implementation yet, so a plugin that asks
-/// for one is told there is none.
-///
 /// # Safety
 ///
-/// `private_data` is unused; any pointer value is accepted.
+/// `private_data` must be the context pointer installed by [`ServiceHost::new`].
 unsafe extern "C" fn get_metadata(
-    _private_data: *mut c_void,
-    _api_version: c_int,
+    private_data: *mut c_void,
+    api_version: c_int,
 ) -> *const RVMetadata {
-    guard(ptr::null(), ptr::null)
+    guard(ptr::null(), || {
+        if api_version != RV_METADATA_API_VERSION {
+            return ptr::null();
+        }
+        // SAFETY: the caller guarantees the context pointer.
+        &raw const unsafe { context(private_data) }.metadata_vtable
+    })
 }
 
 /// # Safety
@@ -384,6 +422,7 @@ mod tests {
     fn a_host_can_be_built_on_one_thread_and_handed_to_another() {
         fn assert_send<T: Send>() {}
         assert_send::<ServiceHost>();
+        assert_send::<MetadataHandle>();
         assert_send::<SettingsHandle>();
     }
 
@@ -415,9 +454,13 @@ mod tests {
                 (service.get_settings.expect("get_settings"))(service.private_data, 2).is_null()
             );
 
-            // No metadata service exists yet, so a plugin asking for one is told so.
+            assert!(!(service.get_metadata.expect("get_metadata"))(
+                service.private_data,
+                RV_METADATA_API_VERSION
+            )
+            .is_null());
             assert!(
-                (service.get_metadata.expect("get_metadata"))(service.private_data, 1).is_null()
+                (service.get_metadata.expect("get_metadata"))(service.private_data, 2).is_null()
             );
         }
     }
