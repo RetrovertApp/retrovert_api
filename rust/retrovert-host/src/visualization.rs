@@ -63,17 +63,20 @@ impl Default for SnapshotBuilder {
 }
 
 impl SnapshotBuilder {
+    #[must_use]
     pub const fn new() -> Self {
         Self {
             scope_sample_budget: DEFAULT_SCOPE_SAMPLE_BUDGET,
         }
     }
 
+    #[must_use]
     pub const fn scope_sample_budget(mut self, samples: u32) -> Self {
         self.scope_sample_budget = samples;
         self
     }
 
+    #[must_use]
     pub const fn configured_scope_sample_budget(&self) -> u32 {
         self.scope_sample_budget
     }
