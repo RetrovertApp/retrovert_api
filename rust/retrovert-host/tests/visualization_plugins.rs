@@ -1,6 +1,6 @@
 //! Dlopen coverage transferred from retrovert-core's v2 visualization suite.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use retrovert_host::ffi::playback::{RVPlaybackPlugin, RVScrollMode, RVVizCaps};
 use retrovert_host::loader::{load_plugins, PluginKind};
@@ -25,22 +25,21 @@ fn resolved(env: &str, relative: &str) -> PathBuf {
     )
 }
 
-fn skip_missing(name: &str, kind: &str, path: &Path) -> bool {
-    if path.exists() {
-        return false;
-    }
-    eprintln!("skipping {name}: {kind} {} is not built", path.display());
-    true
-}
-
 fn exercise(case: Case) {
     let plugin_path = resolved(case.plugin_env, case.plugin_path);
     let module_path = resolved(case.module_env, case.module_path);
-    if skip_missing(case.name, "plugin", &plugin_path)
-        || skip_missing(case.name, "module", &module_path)
-    {
-        return;
-    }
+    assert!(
+        plugin_path.exists(),
+        "{}: plugin {} is not built",
+        case.name,
+        plugin_path.display()
+    );
+    assert!(
+        module_path.exists(),
+        "{}: module {} is missing",
+        case.name,
+        module_path.display()
+    );
 
     let mut report = load_plugins([&plugin_path]);
     assert!(
@@ -166,6 +165,7 @@ macro_rules! viz_case {
         $module_env:literal, $module_path:literal, $caps:expr, $scroll:expr
     ) => {
         #[test]
+        #[ignore = "requires playback plugin and module fixtures"]
         fn $test() {
             exercise(Case {
                 name: $name,
@@ -405,6 +405,7 @@ viz_case!(
 );
 
 #[test]
+#[ignore = "requires playback plugin binaries"]
 fn no_visualization_plugins_keep_every_viz_slot_null() {
     const PLUGINS: &[(&str, &str, &str)] = &[
         (
@@ -446,9 +447,11 @@ fn no_visualization_plugins_keep_every_viz_slot_null() {
 
     for (name, plugin_env, plugin_relative) in PLUGINS {
         let path = resolved(plugin_env, plugin_relative);
-        if skip_missing(name, "plugin", &path) {
-            continue;
-        }
+        assert!(
+            path.exists(),
+            "{name}: plugin {} is not built",
+            path.display()
+        );
         let report = load_plugins([&path]);
         assert!(report.errors.is_empty(), "{name}: {:?}", report.errors);
         let plugin: &RVPlaybackPlugin = report
