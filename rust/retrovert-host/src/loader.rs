@@ -202,6 +202,12 @@ impl PluginSet {
             .filter(move |plugin| plugin.kind == kind)
     }
 
+    pub fn of_kind_mut(&mut self, kind: PluginKind) -> impl Iterator<Item = &mut LoadedPlugin> {
+        self.plugins
+            .iter_mut()
+            .filter(move |plugin| plugin.kind == kind)
+    }
+
     /// Offers the file to each playback plugin in order: the first `Supported` wins,
     /// otherwise the first `Unsure`.
     ///

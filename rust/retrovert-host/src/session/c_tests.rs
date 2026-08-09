@@ -145,10 +145,10 @@ fn load_fixture(dir: &tempfile::TempDir) -> LoadReport {
     report
 }
 
-fn playback(report: &LoadReport) -> &LoadedPlugin {
+fn playback(report: &mut LoadReport) -> &mut LoadedPlugin {
     report
         .plugins
-        .of_kind(PluginKind::Playback)
+        .of_kind_mut(PluginKind::Playback)
         .next()
         .expect("fixture loaded")
 }
@@ -156,14 +156,15 @@ fn playback(report: &LoadReport) -> &LoadedPlugin {
 #[test]
 fn a_c_plugin_plays_through_the_session() {
     let dir = tempfile::tempdir().expect("temp dir");
-    let report = load_fixture(&dir);
-    let loaded = playback(&report);
+    let mut report = load_fixture(&dir);
+    let loaded = playback(&mut report);
+    let fixture_path = loaded.path().to_owned();
 
     let captured = Arc::new(CapturingLog::default());
     let host = host(captured.clone());
     {
         let plugin = Plugin::new(loaded, &host).expect("playback plugin");
-        assert_eq!(fixture_inits(loaded.path()), 1, "static_init did not run");
+        assert_eq!(fixture_inits(&fixture_path), 1, "static_init did not run");
 
         // Subsong 4 seeds the ramp, so the samples prove the argument reached the plugin.
         let mut player = plugin.open("song.mod", 4).expect("open");
@@ -197,9 +198,19 @@ fn a_c_plugin_plays_through_the_session() {
     }
 
     assert_eq!(
-        fixture_inits(loaded.path()),
+        fixture_inits(&fixture_path),
         0,
         "static_destroy did not run"
+    );
+
+    {
+        let _plugin = Plugin::new(loaded, &host).expect("sequential plugin");
+        assert_eq!(fixture_inits(&fixture_path), 1, "static_init did not rerun");
+    }
+    assert_eq!(
+        fixture_inits(&fixture_path),
+        0,
+        "static_destroy did not rerun"
     );
 
     let lines = captured.lines.lock().expect("log lines");
@@ -209,8 +220,8 @@ fn a_c_plugin_plays_through_the_session() {
 #[test]
 fn a_target_format_reaches_the_mixer_ready() {
     let dir = tempfile::tempdir().expect("temp dir");
-    let report = load_fixture(&dir);
-    let loaded = playback(&report);
+    let mut report = load_fixture(&dir);
+    let loaded = playback(&mut report);
 
     let host = host(Arc::new(CapturingLog::default()));
     let plugin = Plugin::new(loaded, &host).expect("playback plugin");
@@ -247,10 +258,10 @@ RVResamplePlugin* rv_resample_plugin(void) { return &plugin; }
 
     let dir = tempfile::tempdir().expect("temp dir");
     compile(dir.path(), "resample_fixture", RESAMPLER);
-    let report = load_plugins([dir.path()]);
+    let mut report = load_plugins([dir.path()]);
     let loaded = report
         .plugins
-        .of_kind(PluginKind::Resample)
+        .of_kind_mut(PluginKind::Resample)
         .next()
         .expect("fixture loaded");
 
@@ -264,8 +275,8 @@ RVResamplePlugin* rv_resample_plugin(void) { return &plugin; }
 #[test]
 fn a_panicking_host_service_does_not_unwind_into_the_plugin() {
     let dir = tempfile::tempdir().expect("temp dir");
-    let report = load_fixture(&dir);
-    let loaded = playback(&report);
+    let mut report = load_fixture(&dir);
+    let loaded = playback(&mut report);
 
     let host = host(Arc::new(PanickingLog));
     let plugin = Plugin::new(loaded, &host).expect("playback plugin");

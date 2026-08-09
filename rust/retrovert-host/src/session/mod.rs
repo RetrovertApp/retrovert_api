@@ -124,8 +124,20 @@ pub enum SessionError {
 
 /// A loaded playback plugin, brought up for as long as this lives.
 ///
-/// `static_init` runs here and `static_destroy` on drop, both of which are global to the
-/// library — so at most one `Plugin` may exist per [`LoadedPlugin`] at a time.
+/// Its exclusive [`LoadedPlugin`] borrow enforces one active `Plugin` per library, matching
+/// the library-global `static_init` and `static_destroy` lifecycle.
+///
+/// ```compile_fail
+/// use retrovert_host::loader::LoadedPlugin;
+/// use retrovert_host::service::ServiceHost;
+/// use retrovert_host::session::Plugin;
+///
+/// fn overlapping(loaded: &mut LoadedPlugin, host: &ServiceHost) {
+///     let first = Plugin::new(loaded, host).unwrap();
+///     let second = Plugin::new(loaded, host).unwrap();
+///     drop((first, second));
+/// }
+/// ```
 pub struct Plugin<'a> {
     plugin: &'a RVPlaybackPlugin,
     service: &'a RVService,
@@ -133,7 +145,7 @@ pub struct Plugin<'a> {
 }
 
 impl<'a> Plugin<'a> {
-    pub fn new(loaded: &'a LoadedPlugin, host: &'a ServiceHost) -> Result<Self, SessionError> {
+    pub fn new(loaded: &'a mut LoadedPlugin, host: &'a ServiceHost) -> Result<Self, SessionError> {
         let plugin = loaded.playback().ok_or(SessionError::NotPlayback)?;
         Ok(Self::from_descriptor(plugin, host))
     }

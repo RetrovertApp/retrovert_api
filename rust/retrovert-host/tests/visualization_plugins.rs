@@ -42,7 +42,7 @@ fn exercise(case: Case) {
         return;
     }
 
-    let report = load_plugins([&plugin_path]);
+    let mut report = load_plugins([&plugin_path]);
     assert!(
         report.errors.is_empty(),
         "{}: {:?}",
@@ -51,7 +51,7 @@ fn exercise(case: Case) {
     );
     let loaded = report
         .plugins
-        .of_kind(PluginKind::Playback)
+        .of_kind_mut(PluginKind::Playback)
         .next()
         .expect("playback descriptor");
     let host = ServiceHost::default();
