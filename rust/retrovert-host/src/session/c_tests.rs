@@ -167,7 +167,11 @@ fn a_c_plugin_plays_through_the_session() {
         assert_eq!(fixture_inits(&fixture_path), 1, "static_init did not run");
 
         // Subsong 4 seeds the ramp, so the samples prove the argument reached the plugin.
-        let mut player = plugin.open("song.mod", 4).expect("open");
+        let mut player = plugin
+            .open("song.mod", 4)
+            .expect("open")
+            .prepare(3)
+            .expect("prepare");
         let chunk = player.read(3).expect("read");
         assert_eq!(
             chunk.samples,
@@ -231,7 +235,9 @@ fn a_target_format_reaches_the_mixer_ready() {
     };
     let mut player = plugin
         .open_with_target("song.mod", 0, target)
-        .expect("open");
+        .expect("open")
+        .prepare(64)
+        .expect("prepare");
 
     let chunk = player.read(64).expect("read");
     assert_eq!(chunk.frames(), 64);
@@ -280,7 +286,11 @@ fn a_panicking_host_service_does_not_unwind_into_the_plugin() {
 
     let host = host(Arc::new(PanickingLog));
     let plugin = Plugin::new(loaded, &host).expect("playback plugin");
-    let mut player = plugin.open("song.mod", 0).expect("open");
+    let mut player = plugin
+        .open("song.mod", 0)
+        .expect("open")
+        .prepare(2)
+        .expect("prepare");
 
     let chunk = player.read(2).expect("read survives the panicking log");
     assert_eq!(chunk.frames(), 2);

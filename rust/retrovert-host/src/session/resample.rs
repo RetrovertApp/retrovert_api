@@ -46,6 +46,7 @@ impl Resampler {
     /// A run stops no earlier than `src_frames - 1` and rebases by `src_frames`, so it
     /// leaves the next one starting at `-1` at worst: a block spans at most `src_frames`
     /// positions. The spare frame absorbs the rounding.
+    #[cfg(test)]
     pub(crate) fn max_output_frames(&self, src_frames: usize) -> usize {
         (src_frames as f64 * f64::from(self.dst_rate) / f64::from(self.src_rate)).ceil() as usize
             + 1

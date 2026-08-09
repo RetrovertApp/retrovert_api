@@ -19,25 +19,43 @@ pub(crate) fn sample_width(format: RVAudioStreamFormat) -> usize {
 ///
 /// `input` must hold `output.len()` samples of `format`.
 pub(crate) fn to_f32(format: RVAudioStreamFormat, input: &[u8], output: &mut [f32]) {
+    const U8_SCALE: f32 = 1.0 / 128.0;
+    const S16_SCALE: f32 = 1.0 / 32_768.0;
+    const S24_SCALE: f32 = 1.0 / 8_388_608.0;
+    const S32_SCALE: f32 = 1.0 / 2_147_483_648.0;
+
     let width = sample_width(format);
-    for (bytes, sample) in input.chunks_exact(width).zip(output.iter_mut()) {
-        *sample = match format {
-            RVAudioStreamFormat::U8 => (f32::from(bytes[0]) - 128.0) / 128.0,
-            RVAudioStreamFormat::S16 => {
-                f32::from(i16::from_ne_bytes([bytes[0], bytes[1]])) / 32768.0
+    assert_eq!(input.len(), output.len() * width);
+
+    match format {
+        RVAudioStreamFormat::U8 => {
+            for (&byte, sample) in input.iter().zip(output.iter_mut()) {
+                *sample = (f32::from(byte) - 128.0) * U8_SCALE;
             }
-            RVAudioStreamFormat::S24 => {
+        }
+        RVAudioStreamFormat::S16 => {
+            for (bytes, sample) in input.chunks_exact(2).zip(output.iter_mut()) {
+                *sample = f32::from(i16::from_ne_bytes([bytes[0], bytes[1]])) * S16_SCALE;
+            }
+        }
+        RVAudioStreamFormat::S24 => {
+            for (bytes, sample) in input.chunks_exact(3).zip(output.iter_mut()) {
                 let sign = if bytes[2] & 0x80 == 0 { 0 } else { 0xff };
-                i32::from_le_bytes([bytes[0], bytes[1], bytes[2], sign]) as f32 / 8_388_608.0
+                *sample =
+                    i32::from_le_bytes([bytes[0], bytes[1], bytes[2], sign]) as f32 * S24_SCALE;
             }
-            RVAudioStreamFormat::S32 => {
-                i32::from_ne_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as f32
-                    / 2_147_483_648.0
+        }
+        RVAudioStreamFormat::S32 => {
+            for (bytes, sample) in input.chunks_exact(4).zip(output.iter_mut()) {
+                *sample =
+                    i32::from_ne_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as f32 * S32_SCALE;
             }
-            RVAudioStreamFormat::F32 => {
-                f32::from_ne_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])
+        }
+        RVAudioStreamFormat::F32 => {
+            for (bytes, sample) in input.chunks_exact(4).zip(output.iter_mut()) {
+                *sample = f32::from_ne_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
             }
-        };
+        }
     }
 }
 

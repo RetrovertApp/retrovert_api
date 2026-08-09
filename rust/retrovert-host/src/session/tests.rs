@@ -6,6 +6,7 @@ use std::sync::Arc;
 use crate::ffi::metadata::RVMetadata;
 use crate::ffi::playback::{RVScrollMode, RVVizInfo};
 use crate::service::{LogCrate, MemorySettingsStore, StdFsIo};
+use crate::visualization::VisualizationConfig;
 
 /// One scripted answer to `read_data`: the bytes to write, and the info to report. The
 /// two are independent so a test can make the plugin lie about what it wrote.
@@ -236,6 +237,26 @@ unsafe extern "C" fn stub_read_data(_user_data: *mut c_void, dest: RVReadData) -
     }
 }
 
+/// A steady-state fixture which performs no bookkeeping or temporary allocation of its own.
+unsafe extern "C" fn allocation_free_read_data(
+    _user_data: *mut c_void,
+    dest: RVReadData,
+) -> RVReadInfo {
+    let format = LAST_FORMAT.with_borrow(|format| *format);
+    let width = RVAudioStreamFormat::from_raw(format.audio_format)
+        .map(convert::sample_width)
+        .unwrap_or(core::mem::size_of::<f32>());
+    let bytes = dest.info.frame_count as usize * format.channel_count as usize * width;
+    // SAFETY: the fixture uses only valid mono/stereo ABI formats, all no wider than the
+    // widest stereo frame the host advertises for every requested frame.
+    unsafe { core::ptr::write_bytes(dest.channels_output.cast::<u8>(), 0, bytes) };
+    RVReadInfo {
+        format,
+        frame_count: dest.info.frame_count,
+        status: RVReadStatus::Ok as u32,
+    }
+}
+
 fn descriptor() -> RVPlaybackPlugin {
     // SAFETY: every field is a nullable pointer, an `Option<fn>` or an integer, and the
     // zero pattern is the null / `None` / zero case for all of them.
@@ -277,16 +298,17 @@ fn with_plugin<R>(body: impl FnOnce(&Plugin<'_>) -> R) -> R {
 fn with_player<R>(
     responses: Vec<Response>,
     target: Option<StreamFormat>,
-    body: impl FnOnce(&mut Player<'_>) -> R,
+    body: impl FnOnce(&mut PreparedPlayer<'_>) -> R,
 ) -> R {
     script(responses);
     with_plugin(|plugin| {
-        let mut player = match target {
+        let player = match target {
             Some(target) => plugin
                 .open_with_target("song.mod", 0, target)
                 .expect("open"),
             None => plugin.open("song.mod", 0).expect("open"),
         };
+        let mut player = player.prepare(1_024).expect("prepare");
         body(&mut player)
     })
 }
@@ -333,6 +355,85 @@ fn a_native_chunk_describes_itself() {
         }
     );
     assert!(!finished);
+}
+
+#[test]
+fn repeated_reads_at_the_prepared_budget_do_not_allocate() {
+    let cases = [
+        (
+            RVAudioFormat {
+                audio_format: RVAudioStreamFormat::F32 as u32,
+                channel_count: 1,
+                sample_rate: 48_000,
+            },
+            None,
+        ),
+        (
+            RVAudioFormat {
+                audio_format: RVAudioStreamFormat::S16 as u32,
+                channel_count: 2,
+                sample_rate: 48_000,
+            },
+            None,
+        ),
+        (
+            RVAudioFormat {
+                audio_format: RVAudioStreamFormat::F32 as u32,
+                channel_count: 1,
+                sample_rate: 48_000,
+            },
+            Some(StreamFormat {
+                sample_rate: 48_000,
+                channels: 2,
+            }),
+        ),
+        (
+            RVAudioFormat {
+                audio_format: RVAudioStreamFormat::F32 as u32,
+                channel_count: 1,
+                sample_rate: 24_000,
+            },
+            Some(StreamFormat {
+                sample_rate: 48_000,
+                channels: 1,
+            }),
+        ),
+        (
+            RVAudioFormat {
+                audio_format: RVAudioStreamFormat::S16 as u32,
+                channel_count: 1,
+                sample_rate: 24_000,
+            },
+            Some(StreamFormat {
+                sample_rate: 48_000,
+                channels: 2,
+            }),
+        ),
+    ];
+
+    for (native, target) in cases {
+        script(Vec::new());
+        LAST_FORMAT.with_borrow_mut(|format| *format = native);
+        let mut descriptor = descriptor();
+        descriptor.read_data = Some(allocation_free_read_data);
+
+        with_descriptor(descriptor, |plugin| {
+            let player = match target {
+                Some(target) => plugin
+                    .open_with_target("song.mod", 0, target)
+                    .expect("open"),
+                None => plugin.open("song.mod", 0).expect("open"),
+            };
+            let mut player = player.prepare(256).expect("prepare");
+
+            crate::test_alloc::assert_no_alloc(|| {
+                for _ in 0..2 {
+                    let chunk = player.read(256).expect("prepared read");
+                    assert_eq!(chunk.frames(), 256);
+                }
+            });
+        });
+    }
 }
 
 #[test]
@@ -732,7 +833,11 @@ fn a_url_with_an_interior_nul_is_refused() {
 fn the_session_brackets_the_plugin_in_order() {
     script(vec![Response::f32(&[0.0], 1, 48_000)]);
     with_plugin(|plugin| {
-        let mut player = plugin.open("song.mod", 0).expect("open");
+        let mut player = plugin
+            .open("song.mod", 0)
+            .expect("open")
+            .prepare(1)
+            .expect("prepare");
         player.read(1).expect("read");
     });
     assert_eq!(
@@ -752,17 +857,30 @@ fn the_session_brackets_the_plugin_in_order() {
 fn the_player_forwards_scope_control_and_builds_snapshots() {
     with_player(Vec::new(), None, |player| {
         player.set_scope_enabled(true);
-        let snapshot = player
-            .build_snapshot(321)
+        let layout = player
+            .prepare_visualization(VisualizationConfig::default())
             .expect("valid visualization")
             .expect("visualization surface");
+        let cached = player
+            .prepare_visualization(VisualizationConfig::default())
+            .expect("cached visualization")
+            .expect("visualization surface");
+        assert!(Arc::ptr_eq(&layout, &cached));
+        let mut snapshot = layout.new_snapshot().expect("snapshot storage");
+        player
+            .capture_visualization(321, &mut snapshot)
+            .expect("capture");
         player.set_scope_enabled(false);
 
         assert_eq!(snapshot.output_frame, 321);
-        assert_eq!(snapshot.caps, 0);
-        assert_eq!(snapshot.scroll_mode, RVScrollMode::Synchronized);
+        assert_eq!(snapshot.layout.caps, 0);
+        assert_eq!(snapshot.layout.scroll_mode, RVScrollMode::Synchronized);
     });
     let events = events();
+    assert_eq!(
+        events.iter().filter(|&&event| event == "viz_info").count(),
+        1
+    );
     assert!(events
         .windows(3)
         .any(|events| { events == ["scope_on", "viz_info", "scope_off"] }));
@@ -911,7 +1029,9 @@ fn repeated_resampled_reads_stay_in_step() {
     with_plugin(|plugin| {
         let mut player = plugin
             .open_with_target("song.mod", 0, target)
-            .expect("open");
+            .expect("open")
+            .prepare(480)
+            .expect("prepare");
         let mut stream = Vec::new();
         for read in 0..4 {
             let chunk = player.read(480).expect("read");
@@ -941,7 +1061,9 @@ fn a_carry_larger_than_the_budget_serves_several_reads() {
     with_plugin(|plugin| {
         let mut player = plugin
             .open_with_target("song.mod", 0, target)
-            .expect("open");
+            .expect("open")
+            .prepare(4)
+            .expect("prepare");
         let mut stream = Vec::new();
         for read in 0..4 {
             let chunk = player.read(4).expect("read");
@@ -1043,7 +1165,7 @@ fn mono_fans_out_to_the_widest_target_while_resampling() {
 }
 
 #[test]
-fn buffers_survive_a_growing_budget() {
+fn prepared_storage_accepts_variable_reads_within_its_budget() {
     with_player(
         vec![
             Response::f32(&[0.1, 0.2], 1, 48_000),
@@ -1055,6 +1177,47 @@ fn buffers_survive_a_growing_budget() {
             assert_eq!(player.read(64).expect("read").frames(), 64);
         },
     );
+}
+
+#[test]
+fn reads_cannot_exceed_the_prepared_budget() {
+    script(Vec::new());
+    with_plugin(|plugin| {
+        let player = plugin
+            .open("song.mod", 0)
+            .expect("open")
+            .prepare(4)
+            .expect("prepare");
+        let mut player = player;
+        assert_eq!(
+            player.read(5).expect_err("oversized read"),
+            SessionError::FrameBudgetExceeded {
+                requested: 5,
+                prepared: 4,
+            }
+        );
+    });
+    assert!(calls().is_empty(), "an oversized read reached the plugin");
+}
+
+#[test]
+fn preparation_rejects_a_budget_the_abi_cannot_advertise() {
+    script(Vec::new());
+    with_plugin(|plugin| {
+        let error = plugin
+            .open("song.mod", 0)
+            .expect("open")
+            .prepare(MAX_PREPARED_FRAMES + 1)
+            .err()
+            .expect("invalid budget");
+        assert_eq!(
+            error,
+            SessionError::InvalidFrameBudget {
+                requested: MAX_PREPARED_FRAMES + 1,
+                maximum: MAX_PREPARED_FRAMES,
+            }
+        );
+    });
 }
 
 #[test]

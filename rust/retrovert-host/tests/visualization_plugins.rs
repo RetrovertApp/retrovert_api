@@ -6,7 +6,7 @@ use retrovert_host::ffi::playback::{RVPlaybackPlugin, RVScrollMode, RVVizCaps};
 use retrovert_host::loader::{load_plugins, PluginKind};
 use retrovert_host::service::ServiceHost;
 use retrovert_host::session::Plugin;
-use retrovert_host::visualization::SnapshotBuilder;
+use retrovert_host::visualization::VisualizationConfig;
 
 struct Case {
     name: &'static str,
@@ -55,9 +55,10 @@ fn exercise(case: Case) {
         .expect("playback descriptor");
     let host = ServiceHost::default();
     let plugin = Plugin::new(loaded, &host).expect("plugin lifecycle");
-    let mut player = plugin
+    let player = plugin
         .open(module_path.to_str().expect("UTF-8 module path"), 0)
         .expect("open module");
+    let mut player = player.prepare(1_024).expect("prepare audio");
 
     player.set_scope_enabled(true);
     for _ in 0..8 {
@@ -66,42 +67,44 @@ fn exercise(case: Case) {
         }
     }
 
-    let snapshot = SnapshotBuilder::new()
-        .scope_sample_budget(257)
-        .build(&mut player, 8_192)
+    let layout = player
+        .prepare_visualization(VisualizationConfig {
+            scope_sample_budget: 257,
+            ..VisualizationConfig::default()
+        })
         .expect("valid visualization")
         .expect("visualization surface");
-    fn assert_send_clone<T: Send + Clone>(_: &T) {}
-    assert_send_clone(&snapshot);
+    let mut snapshot = layout.new_snapshot().expect("snapshot storage");
+    player
+        .capture_visualization(8_192, &mut snapshot)
+        .expect("visualization capture");
+    fn assert_send<T: Send>(_: &T) {}
+    assert_send(&snapshot);
 
     assert_eq!(snapshot.output_frame, 8_192);
-    assert_eq!(snapshot.caps & case.caps, case.caps, "{} caps", case.name);
+    assert_eq!(layout.caps & case.caps, case.caps, "{} caps", case.name);
     if let Some(scroll_mode) = case.scroll_mode {
-        assert_eq!(
-            snapshot.scroll_mode, scroll_mode,
-            "{} scroll mode",
-            case.name
-        );
+        assert_eq!(layout.scroll_mode, scroll_mode, "{} scroll mode", case.name);
     }
 
     if case.caps & RVVizCaps::PATTERN_CELLS != 0 {
-        assert!(!snapshot.columns.is_empty(), "{} columns", case.name);
+        assert!(!layout.columns.is_empty(), "{} columns", case.name);
         assert!(
-            !snapshot.pattern_channels.is_empty(),
+            !layout.pattern_channels.is_empty(),
             "{} pattern channels",
             case.name
         );
         let position = snapshot.position.expect("pattern position");
         let rows = position.window_hi.saturating_sub(position.window_lo) as usize;
         assert_eq!(
-            snapshot.cells.len(),
-            rows * snapshot.pattern_channels.len() * snapshot.columns.len(),
+            snapshot.cells().len(),
+            rows * layout.pattern_channels.len() * layout.columns.len(),
             "{} complete advertised cell window",
             case.name
         );
         assert!(
             snapshot
-                .cells
+                .cells()
                 .iter()
                 .any(|cell| cell.text.iter().any(|&byte| byte != 0)),
             "{} plugin-rendered cell text",
@@ -109,53 +112,63 @@ fn exercise(case: Case) {
         );
     } else {
         assert!(
-            snapshot.columns.is_empty(),
+            layout.columns.is_empty(),
             "{} unexpected columns",
             case.name
         );
         assert!(
-            snapshot.pattern_channels.is_empty(),
+            layout.pattern_channels.is_empty(),
             "{} unexpected pattern channels",
             case.name
         );
-        assert!(snapshot.cells.is_empty(), "{} unexpected cells", case.name);
+        assert!(
+            snapshot.cells().is_empty(),
+            "{} unexpected cells",
+            case.name
+        );
     }
 
     if case.caps & RVVizCaps::SCOPE != 0 {
         assert!(
-            !snapshot.scope_channels.is_empty(),
+            !layout.scope_channels.is_empty(),
             "{} scope channels",
             case.name
         );
         assert_eq!(
-            snapshot.scope.len(),
-            snapshot.scope_channels.len(),
+            snapshot.scope_counts().len(),
+            layout.scope_channels.len(),
             "{} scope waveforms",
             case.name
         );
         assert!(
-            snapshot.scope.iter().all(|waveform| waveform.len() <= 257),
+            (0..layout.scope_channels.len()).all(|channel| snapshot
+                .scope(channel)
+                .is_some_and(|waveform| waveform.len() <= 257)),
             "{} scope budget",
             case.name
         );
     } else {
         assert!(
-            snapshot.scope_channels.is_empty(),
+            layout.scope_channels.is_empty(),
             "{} unexpected scope channels",
             case.name
         );
-        assert!(snapshot.scope.is_empty(), "{} unexpected scope", case.name);
+        assert!(
+            snapshot.scope_counts().is_empty(),
+            "{} unexpected scope",
+            case.name
+        );
     }
 
     if case.caps & RVVizCaps::VU != 0 {
         assert_eq!(
-            snapshot.vu.len(),
-            snapshot.scope_channels.len(),
+            snapshot.vu().len(),
+            layout.scope_channels.len(),
             "{} plugin VU",
             case.name
         );
     } else {
-        assert!(snapshot.vu.is_empty(), "{} unexpected VU", case.name);
+        assert!(snapshot.vu().is_empty(), "{} unexpected VU", case.name);
     }
 }
 

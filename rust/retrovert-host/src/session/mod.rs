@@ -8,8 +8,10 @@ mod convert;
 mod resample;
 
 use core::ffi::c_void;
+use core::ops::{Deref, DerefMut};
 use core::ptr::NonNull;
 use std::ffi::CString;
+use std::sync::Arc;
 
 use crate::ffi::audio_format::{RVAudioFormat, RVAudioStreamFormat};
 use crate::ffi::playback::{
@@ -18,7 +20,7 @@ use crate::ffi::playback::{
 use crate::ffi::service::RVService;
 use crate::loader::LoadedPlugin;
 use crate::service::{MetadataHandle, ServiceHost};
-use crate::visualization::{SnapshotBuilder, VisualizationError, VizSnapshot};
+use crate::visualization::{self, VisualizationConfig, VisualizationError, VizLayout, VizSnapshot};
 use resample::Resampler;
 
 /// The most channels a target format can ask for, bounded by the resampler's state.
@@ -36,6 +38,9 @@ const MAX_SAMPLE_WIDTH: usize = 4;
 /// Keeps the advertised buffer capacity inside the `u32` the ABI carries it in.
 const MAX_REQUEST_FRAMES: usize =
     u32::MAX as usize / (MAX_NATIVE_CHANNELS as usize * MAX_SAMPLE_WIDTH);
+
+/// Largest frame budget accepted by [`Player::prepare`].
+pub const MAX_PREPARED_FRAMES: u32 = MAX_REQUEST_FRAMES as u32;
 
 /// What both C hosts ask for when they have no target format of their own.
 const DEFAULT_HINT: StreamFormat = StreamFormat {
@@ -93,7 +98,7 @@ pub enum AbiViolation {
     ChannelCount(u32),
     #[error("sample_rate 0 cannot define a timebase")]
     ZeroSampleRate,
-    #[error("sample_rate {native} exceeds the {max_ratio}:1 limit against target {target}")]
+    #[error("sample-rate ratio between native {native} and target {target} exceeds {max_ratio}:1")]
     SampleRateRatio {
         native: u32,
         target: u32,
@@ -129,6 +134,10 @@ pub enum SessionError {
     Decode,
     #[error("could not allocate the {0} session buffer")]
     Allocation(&'static str),
+    #[error("frame budget {requested} exceeds the maximum {maximum}")]
+    InvalidFrameBudget { requested: u32, maximum: u32 },
+    #[error("read budget {requested} exceeds the prepared budget {prepared}")]
+    FrameBudgetExceeded { requested: u32, prepared: u32 },
     #[error("ABI violation: {0}")]
     Abi(#[from] AbiViolation),
 }
@@ -232,11 +241,13 @@ impl<'a> Plugin<'a> {
             opened: false,
             target,
             lock: None,
+            pipeline: None,
             resampler: None,
             finished: false,
             carry: 0,
             carry_at: 0,
             buffers: Buffers::default(),
+            visualization: VisualizationState::Unprepared,
         };
 
         // SAFETY: the instance came from this plugin's `create`, and both the url and
@@ -271,21 +282,130 @@ pub struct Player<'a> {
     opened: bool,
     target: Option<StreamFormat>,
     lock: Option<FormatLock>,
+    pipeline: Option<Pipeline>,
     resampler: Option<Resampler>,
     finished: bool,
     /// Frames the last read produced past its budget, waiting at `carry_at` in `out`.
     carry: usize,
     carry_at: usize,
     buffers: Buffers,
+    visualization: VisualizationState,
 }
 
-impl Player<'_> {
-    /// Copies the plugin's complete visualization surface into an owned snapshot.
-    pub fn build_snapshot(
+enum VisualizationState {
+    Unprepared,
+    Absent(VisualizationConfig),
+    Ready(Arc<VizLayout>),
+}
+
+#[derive(Clone, Copy)]
+struct Pipeline {
+    convert: bool,
+    adapt: bool,
+    resample: bool,
+}
+
+/// One open song with all host storage reserved for a fixed real-time frame budget.
+///
+/// Construction through [`Player::prepare`] is the allocation seam. Calls to [`Self::read`]
+/// at or below [`Self::max_frames`] do not allocate in host code, including the first call.
+pub struct PreparedPlayer<'a> {
+    player: Player<'a>,
+    max_frames: u32,
+}
+
+impl<'a> Deref for PreparedPlayer<'a> {
+    type Target = Player<'a>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.player
+    }
+}
+
+impl DerefMut for PreparedPlayer<'_> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.player
+    }
+}
+
+impl PreparedPlayer<'_> {
+    pub const fn max_frames(&self) -> u32 {
+        self.max_frames
+    }
+
+    /// Pulls up to `frames` frames without allocating host storage.
+    pub fn read(&mut self, frames: u32) -> Result<Chunk<'_>, SessionError> {
+        if frames > self.max_frames {
+            return Err(SessionError::FrameBudgetExceeded {
+                requested: frames,
+                prepared: self.max_frames,
+            });
+        }
+        self.player.read_prepared(frames as usize)
+    }
+}
+
+impl<'a> Player<'a> {
+    /// Reserves every host buffer needed by reads up to `max_frames` and consumes the
+    /// unprepared player so the real-time interface cannot be entered accidentally.
+    pub fn prepare(mut self, max_frames: u32) -> Result<PreparedPlayer<'a>, SessionError> {
+        if max_frames > MAX_PREPARED_FRAMES {
+            return Err(SessionError::InvalidFrameBudget {
+                requested: max_frames,
+                maximum: MAX_PREPARED_FRAMES,
+            });
+        }
+        self.buffers.prepare(max_frames as usize, self.target)?;
+        Ok(PreparedPlayer {
+            player: self,
+            max_frames,
+        })
+    }
+
+    /// Queries immutable visualization structure and allocates no per-frame storage.
+    ///
+    /// Repeating this with the same configuration returns the cached layout without
+    /// calling the plugin again. Frame slots are allocated explicitly through
+    /// [`VizLayout::new_snapshot`] before entering the capture loop.
+    pub fn prepare_visualization(
+        &mut self,
+        config: VisualizationConfig,
+    ) -> Result<Option<Arc<VizLayout>>, VisualizationError> {
+        match &self.visualization {
+            VisualizationState::Ready(layout) if layout.config() == config => {
+                return Ok(Some(Arc::clone(layout)));
+            }
+            VisualizationState::Absent(prepared) if *prepared == config => return Ok(None),
+            VisualizationState::Ready(_) | VisualizationState::Absent(_) => {
+                return Err(VisualizationError::ConfigurationChanged);
+            }
+            VisualizationState::Unprepared => {}
+        }
+
+        let layout = visualization::prepare_layout(self.plugin, self.instance.as_ptr(), config)?;
+        self.visualization = match &layout {
+            Some(layout) => VisualizationState::Ready(Arc::clone(layout)),
+            None => VisualizationState::Absent(config),
+        };
+        Ok(layout)
+    }
+
+    /// Refreshes one preallocated frame slot without allocating.
+    pub fn capture_visualization(
         &mut self,
         output_frame: u64,
-    ) -> Result<Option<VizSnapshot>, VisualizationError> {
-        SnapshotBuilder::default().build(self, output_frame)
+        snapshot: &mut VizSnapshot,
+    ) -> Result<(), VisualizationError> {
+        let VisualizationState::Ready(layout) = &self.visualization else {
+            return Err(VisualizationError::NotPrepared);
+        };
+        visualization::capture_snapshot(
+            self.plugin,
+            self.instance.as_ptr(),
+            layout,
+            output_frame,
+            snapshot,
+        )
     }
 
     /// Enables or disables the plugin's scope capture when it advertises that callback.
@@ -294,10 +414,6 @@ impl Player<'_> {
             // SAFETY: the instance belongs to this plugin and the call is serialized with reads.
             unsafe { scope_enable(self.instance.as_ptr(), enabled) };
         }
-    }
-
-    pub(crate) fn visualization_parts(&mut self) -> (&RVPlaybackPlugin, *mut c_void) {
-        (self.plugin, self.instance.as_ptr())
     }
 
     /// What the plugin locked to, once it has produced a chunk.
@@ -338,20 +454,16 @@ impl Player<'_> {
     ///
     /// A short chunk means the song ended, the plugin ran dry, or the resampler is still
     /// gathering source frames.
-    pub fn read(&mut self, frames: u32) -> Result<Chunk<'_>, SessionError> {
-        let budget = (frames as usize).min(MAX_REQUEST_FRAMES);
+    fn read_prepared(&mut self, budget: usize) -> Result<Chunk<'_>, SessionError> {
         let mut produced = self.take_carry();
 
         while produced < budget && !self.finished {
             let request = self.source_frames(budget - produced);
-            self.reserve(request, budget)?;
 
             let info = self.pull(request);
             let (returned, format, finished) = self.validate(info, request)?;
             if self.lock.is_none() {
                 self.start(format)?;
-                // A resampler may have just appeared, and it needs its slack.
-                self.reserve(request, budget)?;
             }
             self.finished |= finished;
             if returned == 0 {
@@ -387,18 +499,6 @@ impl Player<'_> {
                 .copy_within(start..start + carry * channels, 0);
         }
         carry
-    }
-
-    /// Sizes the buffers for one pull. The output buffer holds the budget plus everything
-    /// the resampler could produce from this request, so the run always ends at source
-    /// exhaustion; whatever lands past the budget rides to the next read.
-    fn reserve(&mut self, request: usize, budget: usize) -> Result<(), SessionError> {
-        let slack = self
-            .resampler
-            .as_ref()
-            .map_or(0, |resampler| resampler.max_output_frames(request));
-        let out_channels = self.out_channels();
-        self.buffers.reserve(request, budget + slack, out_channels)
     }
 
     /// Source frames to ask for to fill `wanted` output frames.
@@ -501,10 +601,13 @@ impl Player<'_> {
 
     /// Locks the format the first chunk reported and sets up the conversion it needs.
     fn start(&mut self, format: FormatLock) -> Result<(), SessionError> {
+        let mut adapt = false;
+        let mut resample = false;
         if let Some(target) = self.target {
-            if u64::from(format.sample_rate)
-                > u64::from(target.sample_rate) * u64::from(MAX_SAMPLE_RATE_RATIO)
-            {
+            let native_rate = u64::from(format.sample_rate);
+            let target_rate = u64::from(target.sample_rate);
+            let ratio = u64::from(MAX_SAMPLE_RATE_RATIO);
+            if native_rate > target_rate * ratio || target_rate > native_rate * ratio {
                 return Err(AbiViolation::SampleRateRatio {
                     native: format.sample_rate,
                     target: target.sample_rate,
@@ -524,8 +627,15 @@ impl Player<'_> {
                     target.sample_rate,
                     target.channels as usize,
                 ));
+                resample = true;
             }
+            adapt = format.channels != target.channels;
         }
+        self.pipeline = Some(Pipeline {
+            convert: format.sample_format != RVAudioStreamFormat::F32,
+            adapt,
+            resample,
+        });
         self.lock = Some(format);
         Ok(())
     }
@@ -540,42 +650,71 @@ impl Player<'_> {
         let out_channels = self.out_channels();
         let samples = returned * native_channels;
 
+        let pipeline = self.pipeline.expect("selected with the format lock");
         let Buffers {
             raw,
-            decoded,
-            adapted,
+            scratch,
+            decoded_capacity,
             out,
         } = &mut self.buffers;
+        let (decoded, adapted) = scratch.split_at_mut(*decoded_capacity);
+        let destination = &mut out[produced * out_channels..];
 
-        let width = convert::sample_width(native.sample_format);
-        convert::to_f32(
-            native.sample_format,
-            &raw_bytes(raw)[..samples * width],
-            &mut decoded[..samples],
-        );
+        if !pipeline.resample {
+            if pipeline.adapt {
+                let source = if pipeline.convert {
+                    let width = convert::sample_width(native.sample_format);
+                    convert::to_f32(
+                        native.sample_format,
+                        &raw_bytes(raw)[..samples * width],
+                        &mut decoded[..samples],
+                    );
+                    &decoded[..samples]
+                } else {
+                    &raw_f32(raw)[..samples]
+                };
+                convert::adapt(
+                    source,
+                    native_channels,
+                    &mut destination[..returned * out_channels],
+                    out_channels,
+                );
+            } else if pipeline.convert {
+                let width = convert::sample_width(native.sample_format);
+                convert::to_f32(
+                    native.sample_format,
+                    &raw_bytes(raw)[..samples * width],
+                    &mut destination[..samples],
+                );
+            } else {
+                destination[..samples].copy_from_slice(&raw_f32(raw)[..samples]);
+            }
+            return returned;
+        }
 
-        let source: &[f32] = if native_channels == out_channels {
+        let normalized = if pipeline.convert {
+            let width = convert::sample_width(native.sample_format);
+            convert::to_f32(
+                native.sample_format,
+                &raw_bytes(raw)[..samples * width],
+                &mut decoded[..samples],
+            );
             &decoded[..samples]
         } else {
-            let adapted = &mut adapted[..returned * out_channels];
-            convert::adapt(&decoded[..samples], native_channels, adapted, out_channels);
-            adapted
+            &raw_f32(raw)[..samples]
         };
-
-        let destination = &mut out[produced * out_channels..];
-        match &mut self.resampler {
-            // The whole destination, so the run ends at source exhaustion rather than on
-            // a full buffer, which would rebase the position past frames it never read.
-            Some(resampler) => {
-                let capacity = destination.len() / out_channels;
-                resampler.process(source, returned, destination, capacity)
-            }
-            None => {
-                destination[..returned * out_channels]
-                    .copy_from_slice(&source[..returned * out_channels]);
-                returned
-            }
-        }
+        let source = if pipeline.adapt {
+            let adapted = &mut adapted[..returned * out_channels];
+            convert::adapt(normalized, native_channels, adapted, out_channels);
+            &*adapted
+        } else {
+            normalized
+        };
+        let capacity = destination.len() / out_channels;
+        self.resampler
+            .as_mut()
+            .expect("selected resampling pipeline")
+            .process(source, returned, destination, capacity)
     }
 }
 
@@ -594,31 +733,70 @@ impl Drop for Player<'_> {
     }
 }
 
-/// The buffers one read passes audio through. They grow to the largest budget seen and
-/// stay there, so a steady stream allocates once.
+/// Storage reserved once at the preparation seam.
 #[derive(Default)]
 struct Buffers {
     /// What the plugin writes into. `u32` slots give every sample type the alignment it
     /// may assume while holding exactly four bytes each.
     raw: Vec<u32>,
-    decoded: Vec<f32>,
-    adapted: Vec<f32>,
+    /// One allocation partitioned into normalized and channel-adapted work areas.
+    scratch: Vec<f32>,
+    decoded_capacity: usize,
     out: Vec<f32>,
 }
 
 impl Buffers {
-    fn reserve(
+    fn prepare(
         &mut self,
-        source_frames: usize,
-        out_frames: usize,
-        out_channels: usize,
+        max_frames: usize,
+        target: Option<StreamFormat>,
     ) -> Result<(), SessionError> {
         let native = MAX_NATIVE_CHANNELS as usize;
-        grow(&mut self.raw, source_frames * native, "raw")?;
-        grow(&mut self.decoded, source_frames * native, "decoded")?;
-        grow(&mut self.adapted, source_frames * out_channels, "adapted")?;
-        grow(&mut self.out, out_frames * out_channels, "output")
+        let ratio = MAX_SAMPLE_RATE_RATIO as usize;
+        let source_frames = if target.is_some() {
+            checked_len(max_frames, ratio, 2, "raw")?.min(MAX_REQUEST_FRAMES)
+        } else {
+            max_frames
+        };
+        let raw_samples = checked_len(source_frames, native, 0, "raw")?;
+        // Native delivery converts directly into `out`. A target may require both
+        // normalization and adaptation before resampling, but the ABI reveals that only
+        // on the first read, so its scratch storage is reserved conservatively.
+        let decoded_samples = target.map_or(0, |_| raw_samples);
+        let adapted_samples = match target {
+            Some(target) => checked_len(source_frames, target.channels as usize, 0, "adapted")?,
+            None => 0,
+        };
+        let scratch_samples = decoded_samples
+            .checked_add(adapted_samples)
+            .ok_or(SessionError::Allocation("scratch"))?;
+        // The unlocked first pull can expand by the full ratio. Later pulls include two
+        // source frames of resampler slack, each of which can also expand by the ratio.
+        let output_frames = if target.is_some() {
+            checked_len(max_frames, ratio + 1, ratio * 2 + 1, "output")?
+        } else {
+            max_frames
+        };
+        let out_channels = target.map_or(native, |target| target.channels as usize);
+        let output_samples = checked_len(output_frames, out_channels, 0, "output")?;
+
+        grow(&mut self.raw, raw_samples, "raw")?;
+        grow(&mut self.scratch, scratch_samples, "scratch")?;
+        self.decoded_capacity = decoded_samples;
+        grow(&mut self.out, output_samples, "output")
     }
+}
+
+fn checked_len(
+    count: usize,
+    multiplier: usize,
+    extra: usize,
+    name: &'static str,
+) -> Result<usize, SessionError> {
+    count
+        .checked_mul(multiplier)
+        .and_then(|length| length.checked_add(extra))
+        .ok_or(SessionError::Allocation(name))
 }
 
 fn grow<T: Copy + Default>(
@@ -645,6 +823,12 @@ fn raw_bytes(raw: &[u32]) -> &[u8] {
     // SAFETY: `u32` holds no padding and no invalid bit patterns, and `u8` needs weaker
     // alignment, so the whole allocation reads as initialized bytes.
     unsafe { core::slice::from_raw_parts(raw.as_ptr().cast::<u8>(), core::mem::size_of_val(raw)) }
+}
+
+fn raw_f32(raw: &[u32]) -> &[f32] {
+    // SAFETY: `u32` and `f32` have identical size and alignment, every bit pattern is a
+    // valid `f32`, and the plugin initialized the prefix read by the caller.
+    unsafe { core::slice::from_raw_parts(raw.as_ptr().cast::<f32>(), raw.len()) }
 }
 
 #[cfg(test)]

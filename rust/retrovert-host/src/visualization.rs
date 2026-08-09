@@ -1,29 +1,139 @@
-//! Owned visualization snapshots assembled beside synchronous decoding.
+//! Allocation-free steady-state visualization capture beside synchronous decoding.
 
 use core::ffi::c_void;
+use std::sync::Arc;
 
 use crate::ffi::playback::{
     RVChannelDesc, RVColumnDesc, RVColumnKind, RVPatternCell, RVPlaybackPlugin, RVScrollMode,
     RVTrackerPosition, RVVizCaps, RVVizInfo,
 };
-use crate::session::Player;
 
 pub const DEFAULT_SCOPE_SAMPLE_BUDGET: u32 = 2_048;
+pub const DEFAULT_PATTERN_ROW_BUDGET: u32 = 64;
+pub const MAX_PATTERN_CHANNELS: u32 = 64;
+pub const MAX_SCOPE_CHANNELS: u32 = 64;
+pub const MAX_PATTERN_COLUMNS: u32 = 16;
 
-/// A coherent, frame-stamped copy of one plugin visualization update.
-#[derive(Clone, Debug)]
-pub struct VizSnapshot {
-    pub output_frame: u64,
+/// Fixed storage limits selected before visualization capture starts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct VisualizationConfig {
+    pub scope_sample_budget: u32,
+    pub pattern_row_budget: u32,
+}
+
+impl Default for VisualizationConfig {
+    fn default() -> Self {
+        Self {
+            scope_sample_budget: DEFAULT_SCOPE_SAMPLE_BUDGET,
+            pattern_row_budget: DEFAULT_PATTERN_ROW_BUDGET,
+        }
+    }
+}
+
+/// Immutable visualization structure queried once after a song opens.
+#[derive(Debug)]
+pub struct VizLayout {
     pub caps: u32,
     pub scroll_mode: RVScrollMode,
-    pub columns: Vec<RVColumnDesc>,
-    pub pattern_channels: Vec<RVChannelDesc>,
-    pub scope_channels: Vec<RVChannelDesc>,
+    pub columns: Box<[RVColumnDesc]>,
+    pub pattern_channels: Box<[RVChannelDesc]>,
+    pub scope_channels: Box<[RVChannelDesc]>,
+    config: VisualizationConfig,
+    cell_capacity: usize,
+}
+
+impl VizLayout {
+    /// Allocates one reusable frame slot. Do this during setup, not in the capture loop.
+    pub fn new_snapshot(self: &Arc<Self>) -> Result<VizSnapshot, VisualizationError> {
+        let channel_rows = if self.scroll_mode == RVScrollMode::PerChannel {
+            boxed_buffer(self.pattern_channels.len(), 0, "tracker_channel_rows")?
+        } else {
+            Box::default()
+        };
+        let cells = boxed_buffer(
+            self.cell_capacity,
+            RVPatternCell {
+                raw: 0,
+                text: [0; 16],
+            },
+            "tracker_cells",
+        )?;
+        let scope_counts = if self.caps & RVVizCaps::SCOPE != 0 {
+            boxed_buffer(self.scope_channels.len(), 0, "scope_counts")?
+        } else {
+            Box::default()
+        };
+        let scope_capacity = self
+            .scope_channels
+            .len()
+            .checked_mul(self.config.scope_sample_budget as usize)
+            .ok_or(VisualizationError::DimensionOverflow)?;
+        let scope = if self.caps & RVVizCaps::SCOPE != 0 {
+            boxed_buffer(scope_capacity, 0.0, "scope_samples")?
+        } else {
+            Box::default()
+        };
+        let vu = if self.caps & RVVizCaps::VU != 0 {
+            boxed_buffer(self.scope_channels.len(), 0.0, "vu_levels")?
+        } else {
+            Box::default()
+        };
+
+        Ok(VizSnapshot {
+            output_frame: 0,
+            layout: Arc::clone(self),
+            position: None,
+            channel_rows,
+            cells,
+            cell_count: 0,
+            scope,
+            scope_counts,
+            vu,
+        })
+    }
+
+    pub const fn config(&self) -> VisualizationConfig {
+        self.config
+    }
+}
+
+/// One reusable, frame-stamped visualization slot.
+#[derive(Debug)]
+pub struct VizSnapshot {
+    pub output_frame: u64,
+    pub layout: Arc<VizLayout>,
     pub position: Option<RVTrackerPosition>,
-    pub channel_rows: Vec<u32>,
-    pub cells: Vec<RVPatternCell>,
-    pub scope: Vec<Vec<f32>>,
-    pub vu: Vec<f32>,
+    channel_rows: Box<[u32]>,
+    cells: Box<[RVPatternCell]>,
+    cell_count: usize,
+    scope: Box<[f32]>,
+    scope_counts: Box<[u32]>,
+    vu: Box<[f32]>,
+}
+
+impl VizSnapshot {
+    pub fn channel_rows(&self) -> &[u32] {
+        &self.channel_rows
+    }
+
+    pub fn cells(&self) -> &[RVPatternCell] {
+        &self.cells[..self.cell_count]
+    }
+
+    pub fn scope_counts(&self) -> &[u32] {
+        &self.scope_counts
+    }
+
+    pub fn scope(&self, channel: usize) -> Option<&[f32]> {
+        let &count = self.scope_counts.get(channel)?;
+        let budget = self.layout.config.scope_sample_budget as usize;
+        let start = channel * budget;
+        Some(&self.scope[start..start + count as usize])
+    }
+
+    pub fn vu(&self) -> &[f32] {
+        &self.vu
+    }
 }
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -44,79 +154,33 @@ pub enum VisualizationError {
     },
     #[error("visualization dimensions overflow the ABI count")]
     DimensionOverflow,
+    #[error("visualization {dimension} {actual} exceeds the configured limit {limit}")]
+    DimensionLimit {
+        dimension: &'static str,
+        actual: u32,
+        limit: u32,
+    },
+    #[error("visualization was already prepared with a different configuration")]
+    ConfigurationChanged,
+    #[error("visualization capture was not prepared")]
+    NotPrepared,
+    #[error("snapshot belongs to a different visualization layout")]
+    LayoutMismatch,
     #[error("could not allocate the {0} snapshot buffer")]
     Allocation(&'static str),
 }
 
-/// Controls snapshot assembly without owning cadence, buffering or threading.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct SnapshotBuilder {
-    scope_sample_budget: u32,
-}
-
-impl Default for SnapshotBuilder {
-    fn default() -> Self {
-        Self {
-            scope_sample_budget: DEFAULT_SCOPE_SAMPLE_BUDGET,
-        }
-    }
-}
-
-impl SnapshotBuilder {
-    #[must_use]
-    pub const fn new() -> Self {
-        Self {
-            scope_sample_budget: DEFAULT_SCOPE_SAMPLE_BUDGET,
-        }
-    }
-
-    #[must_use]
-    pub const fn scope_sample_budget(mut self, samples: u32) -> Self {
-        self.scope_sample_budget = samples;
-        self
-    }
-
-    #[must_use]
-    pub const fn configured_scope_sample_budget(&self) -> u32 {
-        self.scope_sample_budget
-    }
-
-    pub fn build(
-        &self,
-        player: &mut Player<'_>,
-        output_frame: u64,
-    ) -> Result<Option<VizSnapshot>, VisualizationError> {
-        let (plugin, instance) = player.visualization_parts();
-        build_snapshot(plugin, instance, output_frame, self.scope_sample_budget)
-    }
-}
-
-fn buffer<T: Copy>(count: u32, zero: T, name: &'static str) -> Result<Vec<T>, VisualizationError> {
-    let mut values = Vec::new();
-    values
-        .try_reserve_exact(count as usize)
-        .map_err(|_| VisualizationError::Allocation(name))?;
-    values.resize(count as usize, zero);
-    Ok(values)
-}
-
-fn read_vec<T: Copy>(
-    count: u32,
+fn boxed_buffer<T: Copy>(
+    count: usize,
     zero: T,
     name: &'static str,
-    fill: impl FnOnce(*mut T, u32) -> u32,
-) -> Result<Vec<T>, VisualizationError> {
-    let mut values = buffer(count, zero, name)?;
-    let returned = fill(values.as_mut_ptr(), count);
-    if returned > count {
-        return Err(VisualizationError::CountOverrun {
-            query: name,
-            returned,
-            capacity: count,
-        });
-    }
-    values.truncate(returned as usize);
-    Ok(values)
+) -> Result<Box<[T]>, VisualizationError> {
+    let mut values = Vec::new();
+    values
+        .try_reserve_exact(count)
+        .map_err(|_| VisualizationError::Allocation(name))?;
+    values.resize(count, zero);
+    Ok(values.into_boxed_slice())
 }
 
 fn read_exact<T: Copy>(
@@ -124,33 +188,47 @@ fn read_exact<T: Copy>(
     zero: T,
     name: &'static str,
     fill: impl FnOnce(*mut T, u32) -> u32,
-) -> Result<Vec<T>, VisualizationError> {
-    let values = read_vec(count, zero, name, fill)?;
-    if values.len() != count as usize {
-        return Err(VisualizationError::CountUnderfill {
-            query: name,
-            returned: values.len() as u32,
-            expected: count,
-        });
-    }
+) -> Result<Box<[T]>, VisualizationError> {
+    let mut values = boxed_buffer(count as usize, zero, name)?;
+    let returned = fill(values.as_mut_ptr(), count);
+    check_exact(name, returned, count)?;
     Ok(values)
 }
 
-fn cell_capacity(info: RVVizInfo, position: RVTrackerPosition) -> Result<u32, VisualizationError> {
-    position
-        .window_hi
-        .saturating_sub(position.window_lo)
-        .checked_mul(info.pattern_channel_count)
-        .and_then(|count| count.checked_mul(info.column_count))
-        .ok_or(VisualizationError::DimensionOverflow)
+fn check_exact(name: &'static str, returned: u32, expected: u32) -> Result<(), VisualizationError> {
+    if returned > expected {
+        return Err(VisualizationError::CountOverrun {
+            query: name,
+            returned,
+            capacity: expected,
+        });
+    }
+    if returned != expected {
+        return Err(VisualizationError::CountUnderfill {
+            query: name,
+            returned,
+            expected,
+        });
+    }
+    Ok(())
 }
 
-fn build_snapshot(
+fn check_limit(dimension: &'static str, actual: u32, limit: u32) -> Result<(), VisualizationError> {
+    if actual > limit {
+        return Err(VisualizationError::DimensionLimit {
+            dimension,
+            actual,
+            limit,
+        });
+    }
+    Ok(())
+}
+
+pub(crate) fn prepare_layout(
     plugin: &RVPlaybackPlugin,
     instance: *mut c_void,
-    output_frame: u64,
-    scope_sample_budget: u32,
-) -> Result<Option<VizSnapshot>, VisualizationError> {
+    config: VisualizationConfig,
+) -> Result<Option<Arc<VizLayout>>, VisualizationError> {
     let Some(viz_info) = plugin.viz_info else {
         return Ok(None);
     };
@@ -167,6 +245,23 @@ fn build_snapshot(
     }
     let scroll_mode = RVScrollMode::from_raw(info.scroll_mode)
         .ok_or(VisualizationError::UnknownScrollMode(info.scroll_mode))?;
+    check_limit(
+        "pattern channel count",
+        info.pattern_channel_count,
+        MAX_PATTERN_CHANNELS,
+    )?;
+    check_limit(
+        "scope channel count",
+        info.scope_channel_count,
+        MAX_SCOPE_CHANNELS,
+    )?;
+    check_limit("column count", info.column_count, MAX_PATTERN_COLUMNS)?;
+
+    let cell_capacity = (config.pattern_row_budget as usize)
+        .checked_mul(info.pattern_channel_count as usize)
+        .and_then(|count| count.checked_mul(info.column_count as usize))
+        .ok_or(VisualizationError::DimensionOverflow)?;
+    u32::try_from(cell_capacity).map_err(|_| VisualizationError::DimensionOverflow)?;
 
     let columns = read_exact(
         info.column_count,
@@ -210,6 +305,32 @@ fn build_snapshot(
         },
     )?;
 
+    Ok(Some(Arc::new(VizLayout {
+        caps: info.caps,
+        scroll_mode,
+        columns,
+        pattern_channels,
+        scope_channels,
+        config,
+        cell_capacity,
+    })))
+}
+
+pub(crate) fn capture_snapshot(
+    plugin: &RVPlaybackPlugin,
+    instance: *mut c_void,
+    layout: &Arc<VizLayout>,
+    output_frame: u64,
+    snapshot: &mut VizSnapshot,
+) -> Result<(), VisualizationError> {
+    if !Arc::ptr_eq(layout, &snapshot.layout) {
+        return Err(VisualizationError::LayoutMismatch);
+    }
+
+    snapshot.output_frame = output_frame;
+    snapshot.cell_count = 0;
+    snapshot.scope_counts.fill(0);
+
     let mut raw_position = RVTrackerPosition {
         order: 0,
         pattern: 0,
@@ -217,108 +338,99 @@ fn build_snapshot(
         window_lo: 0,
         window_hi: 0,
     };
-    let position = plugin.tracker_position.and_then(|callback| {
+    snapshot.position = plugin.tracker_position.and_then(|callback| {
         // SAFETY: `raw_position` is writable and the instance is live.
         unsafe { callback(instance, &mut raw_position) }.then_some(raw_position)
     });
 
-    let channel_rows = if scroll_mode == RVScrollMode::PerChannel {
-        read_exact(
-            info.pattern_channel_count,
-            0,
-            "tracker_channel_rows",
-            |out, cap| {
-                plugin.tracker_channel_rows.map_or(0, |callback| {
-                    // SAFETY: `out` has `cap` writable entries and the instance is live.
-                    unsafe { callback(instance, out, cap) }
-                })
-            },
-        )?
-    } else {
-        Vec::new()
-    };
+    if layout.scroll_mode == RVScrollMode::PerChannel {
+        let expected = layout.pattern_channels.len() as u32;
+        let returned = plugin.tracker_channel_rows.map_or(0, |callback| {
+            // SAFETY: the snapshot owns `expected` writable row entries.
+            unsafe { callback(instance, snapshot.channel_rows.as_mut_ptr(), expected) }
+        });
+        check_exact("tracker_channel_rows", returned, expected)?;
+    }
 
-    let cells = match position {
-        Some(position) if info.caps & RVVizCaps::PATTERN_CELLS != 0 => {
-            let count = cell_capacity(info, position)?;
-            read_exact(
-                count,
-                RVPatternCell {
-                    raw: 0,
-                    text: [0; 16],
-                },
-                "tracker_cells",
-                |out, cap| {
-                    plugin.tracker_cells.map_or(0, |callback| {
-                        // SAFETY: `out` has `cap` writable entries and the instance is live.
-                        unsafe {
-                            callback(
-                                instance,
-                                -1,
-                                position.window_lo,
-                                position.window_hi,
-                                out,
-                                cap,
-                            )
-                        }
-                    })
-                },
-            )?
+    if let Some(position) = snapshot.position {
+        if layout.caps & RVVizCaps::PATTERN_CELLS != 0 {
+            let rows = position.window_hi.saturating_sub(position.window_lo);
+            check_limit("pattern row count", rows, layout.config.pattern_row_budget)?;
+            let count = (rows as usize)
+                .checked_mul(layout.pattern_channels.len())
+                .and_then(|count| count.checked_mul(layout.columns.len()))
+                .ok_or(VisualizationError::DimensionOverflow)?;
+            let capacity =
+                u32::try_from(count).map_err(|_| VisualizationError::DimensionOverflow)?;
+            let returned = plugin.tracker_cells.map_or(0, |callback| {
+                // SAFETY: setup allocated the maximum configured cell count.
+                unsafe {
+                    callback(
+                        instance,
+                        -1,
+                        position.window_lo,
+                        position.window_hi,
+                        snapshot.cells.as_mut_ptr(),
+                        capacity,
+                    )
+                }
+            });
+            check_exact("tracker_cells", returned, capacity)?;
+            snapshot.cell_count = count;
         }
-        _ => Vec::new(),
-    };
+    }
 
-    let mut scope = Vec::new();
-    if info.caps & RVVizCaps::SCOPE != 0 {
-        scope
-            .try_reserve_exact(info.scope_channel_count as usize)
-            .map_err(|_| VisualizationError::Allocation("scope_channels"))?;
+    if layout.caps & RVVizCaps::SCOPE != 0 {
         if let Some(scope_samples) = plugin.scope_samples {
-            for channel_index in 0..info.scope_channel_count {
-                scope.push(read_vec(
-                    scope_sample_budget,
-                    0.0,
-                    "scope_samples",
-                    |out, cap| {
-                        // SAFETY: `out` has `cap` writable entries and the instance is live.
-                        unsafe { scope_samples(instance, channel_index as i32, out, cap) }
-                    },
-                )?);
+            let budget = layout.config.scope_sample_budget as usize;
+            for (channel, count) in snapshot.scope_counts.iter_mut().enumerate() {
+                let samples = &mut snapshot.scope[channel * budget..][..budget];
+                // SAFETY: `samples` holds `scope_sample_budget` writable entries.
+                let returned = unsafe {
+                    scope_samples(
+                        instance,
+                        channel as i32,
+                        samples.as_mut_ptr(),
+                        layout.config.scope_sample_budget,
+                    )
+                };
+                if returned > layout.config.scope_sample_budget {
+                    return Err(VisualizationError::CountOverrun {
+                        query: "scope_samples",
+                        returned,
+                        capacity: layout.config.scope_sample_budget,
+                    });
+                }
+                *count = returned;
             }
         }
     }
 
-    let vu = if info.caps & RVVizCaps::VU != 0 {
-        read_exact(info.scope_channel_count, 0.0, "vu_levels", |out, cap| {
-            plugin.vu_levels.map_or(0, |callback| {
-                // SAFETY: `out` has `cap` writable entries and the instance is live.
-                unsafe { callback(instance, out, cap) }
-            })
-        })?
-    } else {
-        Vec::new()
-    };
+    if layout.caps & RVVizCaps::VU != 0 {
+        let expected = layout.scope_channels.len() as u32;
+        let returned = plugin.vu_levels.map_or(0, |callback| {
+            // SAFETY: the snapshot owns `expected` writable VU entries.
+            unsafe { callback(instance, snapshot.vu.as_mut_ptr(), expected) }
+        });
+        check_exact("vu_levels", returned, expected)?;
+    }
 
-    Ok(Some(VizSnapshot {
-        output_frame,
-        caps: info.caps,
-        scroll_mode,
-        columns,
-        pattern_channels,
-        scope_channels,
-        position,
-        channel_rows,
-        cells,
-        scope,
-        vu,
-    }))
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::Cell;
+
+    thread_local! {
+        static INFO_CALLS: Cell<u32> = const { Cell::new(0) };
+        static COLUMN_CALLS: Cell<u32> = const { Cell::new(0) };
+        static CHANNEL_CALLS: Cell<u32> = const { Cell::new(0) };
+    }
 
     unsafe extern "C" fn info(_instance: *mut c_void, out: *mut RVVizInfo) -> bool {
+        INFO_CALLS.set(INFO_CALLS.get() + 1);
         // SAFETY: the test builder supplies a writable `RVVizInfo`.
         unsafe {
             *out = RVVizInfo {
@@ -333,6 +445,7 @@ mod tests {
     }
 
     unsafe extern "C" fn columns(_instance: *mut c_void, out: *mut RVColumnDesc, cap: u32) -> u32 {
+        COLUMN_CALLS.set(COLUMN_CALLS.get() + 1);
         let kinds = [
             RVColumnKind::Note,
             RVColumnKind::Volume,
@@ -366,6 +479,7 @@ mod tests {
         out: *mut RVChannelDesc,
         cap: u32,
     ) -> u32 {
+        CHANNEL_CALLS.set(CHANNEL_CALLS.get() + 1);
         let channels = [named(b"left"), named(b"right")];
         let count = channels.len().min(cap as usize);
         for (index, channel) in channels.into_iter().take(count).enumerate() {
@@ -568,37 +682,62 @@ mod tests {
         plugin
     }
 
+    fn build_for_test(
+        plugin: &RVPlaybackPlugin,
+        output_frame: u64,
+        scope_sample_budget: u32,
+    ) -> Result<Option<VizSnapshot>, VisualizationError> {
+        let config = VisualizationConfig {
+            scope_sample_budget,
+            ..VisualizationConfig::default()
+        };
+        let Some(layout) = prepare_layout(plugin, core::ptr::null_mut(), config)? else {
+            return Ok(None);
+        };
+        let mut snapshot = layout.new_snapshot()?;
+        capture_snapshot(
+            plugin,
+            core::ptr::null_mut(),
+            &layout,
+            output_frame,
+            &mut snapshot,
+        )?;
+        Ok(Some(snapshot))
+    }
+
     #[test]
     fn snapshot_matches_stub_across_threads() {
         let plugin = plugin();
-        let snapshot = build_snapshot(&plugin, core::ptr::null_mut(), 12_345, 64)
+        let snapshot = build_for_test(&plugin, 12_345, 64)
             .expect("valid snapshot")
             .expect("visualization");
 
-        fn assert_send_clone<T: Send + Clone>(_: &T) {}
-        assert_send_clone(&snapshot);
-        let clone = snapshot.clone();
-        let output_frame = std::thread::spawn(move || clone.output_frame)
+        fn assert_send<T: Send>(_: &T) {}
+        assert_send(&snapshot);
+        let snapshot = std::thread::spawn(move || snapshot)
             .join()
             .expect("consumer thread");
 
-        assert_eq!(output_frame, 12_345);
-        assert_eq!(snapshot.caps, 7);
-        assert_eq!(snapshot.scroll_mode, RVScrollMode::Synchronized);
-        assert_eq!(snapshot.columns.len(), 3);
-        assert_eq!(snapshot.columns[2].kind, RVColumnKind::Effect as u32);
-        assert_eq!(&snapshot.pattern_channels[0].name[..4], b"left");
-        assert_eq!(snapshot.scope_channels.len(), 2);
+        assert_eq!(snapshot.output_frame, 12_345);
+        assert_eq!(snapshot.layout.caps, 7);
+        assert_eq!(snapshot.layout.scroll_mode, RVScrollMode::Synchronized);
+        assert_eq!(snapshot.layout.columns.len(), 3);
+        assert_eq!(snapshot.layout.columns[2].kind, RVColumnKind::Effect as u32);
+        assert_eq!(&snapshot.layout.pattern_channels[0].name[..4], b"left");
+        assert_eq!(snapshot.layout.scope_channels.len(), 2);
         assert_eq!(snapshot.position.expect("position").row, 4);
-        assert!(snapshot.channel_rows.is_empty());
-        assert_eq!(snapshot.cells.len(), 8 * 2 * 3);
-        assert_eq!(snapshot.cells[47].text, [47; 16]);
-        assert_eq!(snapshot.scope.len(), 2);
-        assert_eq!(snapshot.scope[0].len(), 64);
-        assert_eq!(snapshot.scope[0][0], 0.0);
-        assert_eq!(snapshot.scope[0][63], 63.0 / 64.0);
-        assert!(snapshot.scope[1].iter().all(|&sample| sample == 0.5));
-        assert_eq!(snapshot.vu, [0.8, 0.3]);
+        assert!(snapshot.channel_rows().is_empty());
+        assert_eq!(snapshot.cells().len(), 8 * 2 * 3);
+        assert_eq!(snapshot.cells()[47].text, [47; 16]);
+        assert_eq!(snapshot.scope(0).expect("left scope").len(), 64);
+        assert_eq!(snapshot.scope(0).expect("left scope")[0], 0.0);
+        assert_eq!(snapshot.scope(0).expect("left scope")[63], 63.0 / 64.0);
+        assert!(snapshot
+            .scope(1)
+            .expect("right scope")
+            .iter()
+            .all(|&sample| sample == 0.5));
+        assert_eq!(snapshot.vu(), [0.8, 0.3]);
     }
 
     #[test]
@@ -610,19 +749,19 @@ mod tests {
         plugin.scope_samples = None;
         plugin.vu_levels = None;
 
-        let snapshot = build_snapshot(&plugin, core::ptr::null_mut(), 1, 64)
+        let snapshot = build_for_test(&plugin, 1, 64)
             .expect("valid snapshot")
             .expect("visualization");
-        assert_eq!(snapshot.channel_rows, [10, 20, 30]);
-        assert!(snapshot.scope.is_empty());
-        assert!(snapshot.vu.is_empty());
+        assert_eq!(snapshot.channel_rows(), [10, 20, 30]);
+        assert!(snapshot.scope_counts().is_empty());
+        assert!(snapshot.vu().is_empty());
     }
 
     #[test]
     fn absent_visualization_returns_none() {
         // SAFETY: every field has a valid all-zero representation.
         let plugin: RVPlaybackPlugin = unsafe { core::mem::zeroed() };
-        assert!(build_snapshot(&plugin, core::ptr::null_mut(), 0, 64)
+        assert!(build_for_test(&plugin, 0, 64)
             .expect("valid absence")
             .is_none());
     }
@@ -630,19 +769,16 @@ mod tests {
     #[test]
     fn scope_budget_and_plugin_counts_are_enforced() {
         let plugin = plugin();
-        let snapshot = build_snapshot(&plugin, core::ptr::null_mut(), 0, 7)
+        let snapshot = build_for_test(&plugin, 0, 7)
             .expect("valid snapshot")
             .expect("visualization");
-        assert_eq!(snapshot.scope[0].len(), 7);
-        assert_eq!(
-            SnapshotBuilder::default().configured_scope_sample_budget(),
-            2_048
-        );
+        assert_eq!(snapshot.scope(0).expect("scope").len(), 7);
+        assert_eq!(VisualizationConfig::default().scope_sample_budget, 2_048);
 
         let mut bad = plugin;
         bad.scope_samples = Some(overrun_scope);
         assert!(matches!(
-            build_snapshot(&bad, core::ptr::null_mut(), 0, 7),
+            build_for_test(&bad, 0, 7),
             Err(VisualizationError::CountOverrun {
                 query: "scope_samples",
                 returned: 8,
@@ -653,7 +789,7 @@ mod tests {
         bad = plugin;
         bad.tracker_columns = Some(underfill_columns);
         assert!(matches!(
-            build_snapshot(&bad, core::ptr::null_mut(), 0, 7),
+            build_for_test(&bad, 0, 7),
             Err(VisualizationError::CountUnderfill {
                 query: "tracker_columns",
                 returned: 2,
@@ -667,7 +803,7 @@ mod tests {
         let mut plugin = plugin();
         plugin.viz_info = Some(unknown_scroll_info);
         assert!(matches!(
-            build_snapshot(&plugin, core::ptr::null_mut(), 0, 7),
+            build_for_test(&plugin, 0, 7),
             Err(VisualizationError::UnknownScrollMode(99))
         ));
 
@@ -677,8 +813,43 @@ mod tests {
         plugin.scope_channels = None;
         plugin.tracker_position = Some(one_row_position);
         assert!(matches!(
-            build_snapshot(&plugin, core::ptr::null_mut(), 0, 7),
-            Err(VisualizationError::DimensionOverflow)
+            build_for_test(&plugin, 0, 7),
+            Err(VisualizationError::DimensionLimit { .. })
         ));
+    }
+
+    #[test]
+    fn repeated_capture_reuses_layout_and_frame_storage() {
+        INFO_CALLS.set(0);
+        COLUMN_CALLS.set(0);
+        CHANNEL_CALLS.set(0);
+
+        let plugin = plugin();
+        let config = VisualizationConfig {
+            scope_sample_budget: 64,
+            ..VisualizationConfig::default()
+        };
+        let layout = prepare_layout(&plugin, core::ptr::null_mut(), config)
+            .expect("valid layout")
+            .expect("visualization");
+        let mut snapshot = layout.new_snapshot().expect("frame storage");
+        let cell_ptr = snapshot.cells.as_ptr();
+        let scope_ptr = snapshot.scope.as_ptr();
+        let vu_ptr = snapshot.vu.as_ptr();
+
+        crate::test_alloc::assert_no_alloc(|| {
+            capture_snapshot(&plugin, core::ptr::null_mut(), &layout, 1, &mut snapshot)
+                .expect("first capture");
+            capture_snapshot(&plugin, core::ptr::null_mut(), &layout, 2, &mut snapshot)
+                .expect("second capture");
+        });
+
+        assert_eq!(INFO_CALLS.get(), 1);
+        assert_eq!(COLUMN_CALLS.get(), 1);
+        assert_eq!(CHANNEL_CALLS.get(), 2);
+        assert_eq!(snapshot.output_frame, 2);
+        assert_eq!(snapshot.cells.as_ptr(), cell_ptr);
+        assert_eq!(snapshot.scope.as_ptr(), scope_ptr);
+        assert_eq!(snapshot.vu.as_ptr(), vu_ptr);
     }
 }

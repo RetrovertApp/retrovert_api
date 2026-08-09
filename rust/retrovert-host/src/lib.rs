@@ -6,4 +6,6 @@ pub mod ffi;
 pub mod loader;
 pub mod service;
 pub mod session;
+#[cfg(test)]
+mod test_alloc;
 pub mod visualization;
