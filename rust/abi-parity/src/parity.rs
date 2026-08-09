@@ -5,6 +5,7 @@
 //! them readable next to the headers instead of one identifier per line.
 
 use core::mem::{align_of, offset_of, size_of};
+use std::any::type_name;
 use std::collections::HashSet;
 
 use retrovert_host::ffi::audio_format::*;
@@ -35,10 +36,69 @@ macro_rules! field_size {
     }};
 }
 
+macro_rules! field_type {
+    ($ty:ty, $field:ident) => {{
+        fn type_of_pointee<T>(_: *const T) -> &'static str {
+            type_name::<T>()
+        }
+        let value = core::mem::MaybeUninit::<$ty>::uninit();
+        // SAFETY: forming a raw pointer to a field reads nothing.
+        type_of_pointee(unsafe { &raw const (*value.as_ptr()).$field })
+    }};
+}
+
+fn canonical_signature(name: &str) -> String {
+    let mut name = name.to_owned();
+    for module in [
+        "retrovert_host::ffi::audio_format::",
+        "retrovert_host::ffi::io::",
+        "retrovert_host::ffi::log::",
+        "retrovert_host::ffi::metadata::",
+        "retrovert_host::ffi::output::",
+        "retrovert_host::ffi::playback::",
+        "retrovert_host::ffi::resample::",
+        "retrovert_host::ffi::service::",
+        "retrovert_host::ffi::settings::",
+        "abi_parity::c::",
+    ] {
+        name = name.replace(module, "");
+    }
+    for opaque in [
+        "RVIoPrivate",
+        "RVLogPrivate",
+        "RVMetadataPrivate",
+        "RVSettingsPrivate",
+        "RVServicePrivData",
+    ] {
+        name = name.replace(opaque, "core::ffi::c_void");
+    }
+    name
+}
+
+fn assert_function_signature(mirror: &str, header: &str, field: &str) {
+    if mirror.contains("unsafe extern \"C\" fn(") || header.contains("unsafe extern \"C\" fn(") {
+        assert_eq!(
+            canonical_signature(mirror),
+            canonical_signature(header),
+            "{field}: function signature",
+        );
+    }
+}
+
 /// Size, alignment and every field's offset and width against the generated header type.
 macro_rules! layout {
-    ($covered:expr, $name:ident $(, $field:ident)* $(,)?) => {{
+    ($covered:expr, $name:ident $(,)?) => {{
         $covered.mark(stringify!($name));
+        assert_eq!(
+            (size_of::<$name>(), align_of::<$name>()),
+            (size_of::<c::$name>(), align_of::<c::$name>()),
+            concat!(stringify!($name), ": size/align"),
+        );
+    }};
+    ($covered:expr, $name:ident, $($field:ident),+ $(,)?) => {{
+        $covered.mark(stringify!($name));
+        let _: fn($name) = |$name { $($field: _,)+ }| {};
+        let _: fn(c::$name) = |c::$name { $($field: _,)+ }| {};
         assert_eq!(
             (size_of::<$name>(), align_of::<$name>()),
             (size_of::<c::$name>(), align_of::<c::$name>()),
@@ -48,6 +108,11 @@ macro_rules! layout {
             (offset_of!($name, $field), field_size!($name, $field)),
             (offset_of!(c::$name, $field), field_size!(c::$name, $field)),
             concat!(stringify!($name), ".", stringify!($field), ": offset/size"),
+        );
+        assert_function_signature(
+            field_type!($name, $field),
+            field_type!(c::$name, $field),
+            concat!(stringify!($name), ".", stringify!($field)),
         );)*
     }};
 }
