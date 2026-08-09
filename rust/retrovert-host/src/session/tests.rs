@@ -4,6 +4,7 @@ use std::cell::RefCell;
 use std::sync::Arc;
 
 use crate::ffi::metadata::RVMetadata;
+use crate::ffi::playback::{RVScrollMode, RVVizInfo};
 use crate::service::{LogCrate, MemorySettingsStore, StdFsIo};
 
 /// One scripted answer to `read_data`: the bytes to write, and the info to report. The
@@ -145,6 +146,25 @@ extern "C" fn stub_settings_updated(_user_data: *mut c_void, _services: *const R
     SETTINGS_RESULT.with_borrow(|result| *result)
 }
 
+unsafe extern "C" fn stub_viz_info(_user_data: *mut c_void, out: *mut RVVizInfo) -> bool {
+    note("viz_info");
+    // SAFETY: the snapshot builder supplies a writable `RVVizInfo`.
+    unsafe {
+        *out = RVVizInfo {
+            caps: 0,
+            scroll_mode: RVScrollMode::Synchronized as u32,
+            pattern_channel_count: 0,
+            scope_channel_count: 0,
+            column_count: 0,
+        }
+    };
+    true
+}
+
+extern "C" fn stub_scope_enable(_user_data: *mut c_void, enabled: bool) {
+    note(if enabled { "scope_on" } else { "scope_off" });
+}
+
 unsafe extern "C" fn stub_read_data(_user_data: *mut c_void, dest: RVReadData) -> RVReadInfo {
     CALLS.with_borrow_mut(|calls| {
         calls.push(Call {
@@ -229,6 +249,8 @@ fn descriptor() -> RVPlaybackPlugin {
     plugin.close = Some(stub_close);
     plugin.read_data = Some(stub_read_data);
     plugin.settings_updated = Some(stub_settings_updated);
+    plugin.viz_info = Some(stub_viz_info);
+    plugin.scope_enable = Some(stub_scope_enable);
     plugin
 }
 
@@ -688,6 +710,26 @@ fn the_session_brackets_the_plugin_in_order() {
             "static_destroy"
         ]
     );
+}
+
+#[test]
+fn the_player_forwards_scope_control_and_builds_snapshots() {
+    with_player(Vec::new(), None, |player| {
+        player.set_scope_enabled(true);
+        let snapshot = player
+            .build_snapshot(321)
+            .expect("valid visualization")
+            .expect("visualization surface");
+        player.set_scope_enabled(false);
+
+        assert_eq!(snapshot.output_frame, 321);
+        assert_eq!(snapshot.caps, 0);
+        assert_eq!(snapshot.scroll_mode, RVScrollMode::Synchronized);
+    });
+    let events = events();
+    assert!(events
+        .windows(3)
+        .any(|events| { events == ["scope_on", "viz_info", "scope_off"] }));
 }
 
 #[test]

@@ -18,6 +18,7 @@ use crate::ffi::playback::{
 use crate::ffi::service::RVService;
 use crate::loader::LoadedPlugin;
 use crate::service::{MetadataHandle, ServiceHost};
+use crate::visualization::{SnapshotBuilder, VisualizationError, VizSnapshot};
 use resample::Resampler;
 
 /// The most channels a target format can ask for, bounded by the resampler's state.
@@ -256,6 +257,26 @@ pub struct Player<'a> {
 }
 
 impl Player<'_> {
+    /// Copies the plugin's complete visualization surface into an owned snapshot.
+    pub fn build_snapshot(
+        &mut self,
+        output_frame: u64,
+    ) -> Result<Option<VizSnapshot>, VisualizationError> {
+        SnapshotBuilder::default().build(self, output_frame)
+    }
+
+    /// Enables or disables the plugin's scope capture when it advertises that callback.
+    pub fn set_scope_enabled(&mut self, enabled: bool) {
+        if let Some(scope_enable) = self.plugin.scope_enable {
+            // SAFETY: the instance belongs to this plugin and the call is serialized with reads.
+            unsafe { scope_enable(self.instance.as_ptr(), enabled) };
+        }
+    }
+
+    pub(crate) fn visualization_parts(&mut self) -> (&RVPlaybackPlugin, *mut c_void) {
+        (self.plugin, self.instance.as_ptr())
+    }
+
     /// What the plugin locked to, once it has produced a chunk.
     pub fn native_format(&self) -> Option<FormatLock> {
         self.lock

@@ -6,3 +6,4 @@ pub mod ffi;
 pub mod loader;
 pub mod service;
 pub mod session;
+pub mod visualization;
