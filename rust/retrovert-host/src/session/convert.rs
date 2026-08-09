@@ -20,8 +20,7 @@ pub(crate) fn sample_width(format: RVAudioStreamFormat) -> usize {
 /// `input` must hold `output.len()` samples of `format`.
 pub(crate) fn to_f32(format: RVAudioStreamFormat, input: &[u8], output: &mut [f32]) {
     let width = sample_width(format);
-    for (index, sample) in output.iter_mut().enumerate() {
-        let bytes = &input[index * width..];
+    for (bytes, sample) in input.chunks_exact(width).zip(output.iter_mut()) {
         *sample = match format {
             RVAudioStreamFormat::U8 => (f32::from(bytes[0]) - 128.0) / 128.0,
             RVAudioStreamFormat::S16 => {
