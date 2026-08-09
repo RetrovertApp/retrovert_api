@@ -18,8 +18,8 @@ use crate::ffi::playback::{
     RVPlaybackPlugin, RVReadData, RVReadInfo, RVReadStatus, RVSettingsUpdate,
 };
 use crate::ffi::service::RVService;
-use crate::loader::LoadedPlugin;
-use crate::service::{MetadataHandle, ServiceHost};
+use crate::loader::{LoadedPlugin, PluginKind, PluginSet};
+use crate::service::{MetadataHandle, ServiceHost, TrackMetadata};
 use crate::visualization::{self, VisualizationConfig, VisualizationError, VizLayout, VizSnapshot};
 use resample::Resampler;
 
@@ -126,6 +126,8 @@ pub enum SessionError {
     CreateFailed,
     #[error("open() failed with {0}")]
     OpenFailed(i32),
+    #[error("metadata() failed with {0}")]
+    MetadataFailed(i32),
     #[error("target format {} Hz / {} channels is not playable", .0.sample_rate, .0.channels)]
     InvalidTarget(StreamFormat),
     #[error("no built-in adaptation from {from} to {to} channels")]
@@ -159,6 +161,7 @@ pub enum SessionError {
 /// }
 /// ```
 pub struct Plugin<'a> {
+    name: &'a str,
     plugin: &'a RVPlaybackPlugin,
     service: &'a RVService,
     metadata: MetadataHandle,
@@ -166,11 +169,12 @@ pub struct Plugin<'a> {
 
 impl<'a> Plugin<'a> {
     pub fn new(loaded: &'a mut LoadedPlugin, host: &'a ServiceHost) -> Result<Self, SessionError> {
+        let name = loaded.name();
         let plugin = loaded.playback().ok_or(SessionError::NotPlayback)?;
-        Ok(Self::from_descriptor(plugin, host))
+        Ok(Self::from_descriptor(name, plugin, host))
     }
 
-    fn from_descriptor(plugin: &'a RVPlaybackPlugin, host: &'a ServiceHost) -> Self {
+    fn from_descriptor(name: &'a str, plugin: &'a RVPlaybackPlugin, host: &'a ServiceHost) -> Self {
         let service = host.service();
         if let Some(static_init) = plugin.static_init {
             // SAFETY: the plugin published this callback, and the service locator stays
@@ -178,16 +182,39 @@ impl<'a> Plugin<'a> {
             unsafe { static_init(service) };
         }
         Self {
+            name,
             plugin,
             service,
             metadata: host.metadata(),
         }
     }
 
+    pub fn name(&self) -> &str {
+        self.name
+    }
+
     /// Opens a song, leaving conversion to the caller: chunks arrive at the plugin's own
     /// rate and channel count.
     pub fn open(&self, url: &str, subsong: u32) -> Result<Player<'_>, SessionError> {
         self.open_inner(url, subsong, None)
+    }
+
+    /// Runs the plugin's static metadata pass. A plugin without one reports no record.
+    pub fn metadata(&self, url: &str) -> Result<Option<TrackMetadata>, SessionError> {
+        let Some(metadata) = self.plugin.metadata else {
+            return Ok(None);
+        };
+        let url = CString::new(url).map_err(|_| SessionError::InvalidUrl)?;
+        self.metadata.discard();
+
+        // SAFETY: the URL is live and NUL-terminated for the call, and the service
+        // locator stays live for this plugin's whole lifetime.
+        let result = unsafe { metadata(url.as_ptr(), self.service) };
+        if result != 0 {
+            self.metadata.discard();
+            return Err(SessionError::MetadataFailed(result));
+        }
+        Ok(Some(self.metadata.take()))
     }
 
     /// Opens a song for mixing at `target`: chunks arrive resampled and channel-adapted.
@@ -260,6 +287,45 @@ impl<'a> Plugin<'a> {
         }
         player.opened = true;
         Ok(player)
+    }
+}
+
+/// Playback plugins initialized against one host and kept live through selection and use.
+pub struct PlaybackPlugins<'a> {
+    plugins: Vec<Plugin<'a>>,
+}
+
+impl<'a> PlaybackPlugins<'a> {
+    pub fn new(loaded: &'a mut PluginSet, host: &'a ServiceHost) -> Result<Self, SessionError> {
+        let plugins = loaded
+            .of_kind_mut(PluginKind::Playback)
+            .map(|loaded| Plugin::new(loaded, host))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Self { plugins })
+    }
+
+    /// The first supported plugin wins; the first unsure plugin is the fallback.
+    pub fn select(&self, data: &[u8], filename: &str, total_size: u64) -> Option<&Plugin<'a>> {
+        crate::loader::select_playback_candidate(
+            &self.plugins,
+            |plugin| Some(plugin.plugin),
+            data,
+            filename,
+            total_size,
+        )
+    }
+
+    #[cfg(test)]
+    fn from_descriptors(
+        descriptors: &'a [(&'a str, &'a RVPlaybackPlugin)],
+        host: &'a ServiceHost,
+    ) -> Self {
+        Self {
+            plugins: descriptors
+                .iter()
+                .map(|(name, descriptor)| Plugin::from_descriptor(name, descriptor, host))
+                .collect(),
+        }
     }
 }
 

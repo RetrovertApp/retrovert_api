@@ -218,36 +218,50 @@ impl PluginSet {
         filename: &str,
         total_size: u64,
     ) -> Option<&LoadedPlugin> {
-        if data.is_empty() {
-            return None;
-        }
-        let filename = CString::new(filename).ok()?;
-
-        let mut unsure = None;
-        for loaded in self.of_kind(PluginKind::Playback) {
-            let Some(probe) = loaded.playback().and_then(|plugin| plugin.probe_can_play) else {
-                continue;
-            };
-            // Plugins are free to scribble on the probe buffer, so each gets its own.
-            let mut probe_data = data.to_vec();
-            // SAFETY: `probe_data` is live and writable for its whole length and
-            // `filename` is a live NUL-terminated string for the duration of the call.
-            let raw = unsafe {
-                probe(
-                    probe_data.as_mut_ptr(),
-                    probe_data.len() as u64,
-                    filename.as_ptr(),
-                    total_size,
-                )
-            };
-            match RVProbeResult::from_raw(raw) {
-                Some(RVProbeResult::Supported) => return Some(loaded),
-                Some(RVProbeResult::Unsure) if unsure.is_none() => unsure = Some(loaded),
-                _ => {}
-            }
-        }
-        unsure
+        select_playback_candidate(
+            self.of_kind(PluginKind::Playback),
+            LoadedPlugin::playback,
+            data,
+            filename,
+            total_size,
+        )
     }
+}
+
+pub(crate) fn select_playback_candidate<'a, T: 'a>(
+    candidates: impl IntoIterator<Item = &'a T>,
+    descriptor: impl Fn(&'a T) -> Option<&'a RVPlaybackPlugin>,
+    data: &[u8],
+    filename: &str,
+    total_size: u64,
+) -> Option<&'a T> {
+    if data.is_empty() {
+        return None;
+    }
+    let filename = CString::new(filename).ok()?;
+
+    let mut unsure = None;
+    for candidate in candidates {
+        let Some(probe) = descriptor(candidate).and_then(|plugin| plugin.probe_can_play) else {
+            continue;
+        };
+        let mut probe_data = data.to_vec();
+        // SAFETY: each plugin receives a private writable copy and a live C string.
+        let raw = unsafe {
+            probe(
+                probe_data.as_mut_ptr(),
+                probe_data.len() as u64,
+                filename.as_ptr(),
+                total_size,
+            )
+        };
+        match RVProbeResult::from_raw(raw) {
+            Some(RVProbeResult::Supported) => return Some(candidate),
+            Some(RVProbeResult::Unsure) if unsure.is_none() => unsure = Some(candidate),
+            _ => {}
+        }
+    }
+    unsure
 }
 
 /// What one batch produced.

@@ -4,7 +4,7 @@ use std::cell::RefCell;
 use std::sync::Arc;
 
 use crate::ffi::metadata::RVMetadata;
-use crate::ffi::playback::{RVScrollMode, RVVizInfo};
+use crate::ffi::playback::{RVProbeResult, RVScrollMode, RVVizInfo};
 use crate::service::{LogCrate, MemorySettingsStore, StdFsIo};
 use crate::visualization::VisualizationConfig;
 
@@ -70,6 +70,7 @@ thread_local! {
     static RAMP: RefCell<Option<Ramp>> = const { RefCell::new(None) };
     static OPEN_RESULT: RefCell<i32> = const { RefCell::new(0) };
     static SETTINGS_RESULT: RefCell<u32> = const { RefCell::new(0) };
+    static METADATA_RESULT: RefCell<i32> = const { RefCell::new(0) };
     static LAST_FORMAT: RefCell<RVAudioFormat> = const {
         RefCell::new(RVAudioFormat {
             audio_format: RVAudioStreamFormat::F32 as u32,
@@ -85,6 +86,7 @@ fn script(responses: Vec<Response>) {
     CALLS.with_borrow_mut(Vec::clear);
     EVENTS.with_borrow_mut(Vec::clear);
     OPEN_RESULT.with_borrow_mut(|slot| *slot = 0);
+    METADATA_RESULT.with_borrow_mut(|slot| *slot = 0);
 }
 
 fn script_ramp(sample_rate: u32) {
@@ -117,6 +119,51 @@ extern "C" fn stub_static_destroy() {
     note("static_destroy");
 }
 
+unsafe extern "C" fn supported_probe(
+    _data: *mut u8,
+    _probe_size: u64,
+    _filename: *const core::ffi::c_char,
+    _total_size: u64,
+) -> u32 {
+    if events()
+        .iter()
+        .filter(|event| **event == "static_init")
+        .count()
+        == 2
+    {
+        RVProbeResult::Supported as u32
+    } else {
+        RVProbeResult::Unsupported as u32
+    }
+}
+
+unsafe extern "C" fn unsure_probe(
+    _data: *mut u8,
+    _probe_size: u64,
+    _filename: *const core::ffi::c_char,
+    _total_size: u64,
+) -> u32 {
+    RVProbeResult::Unsure as u32
+}
+
+unsafe extern "C" fn unsupported_probe(
+    _data: *mut u8,
+    _probe_size: u64,
+    _filename: *const core::ffi::c_char,
+    _total_size: u64,
+) -> u32 {
+    RVProbeResult::Unsupported as u32
+}
+
+unsafe extern "C" fn invalid_probe(
+    _data: *mut u8,
+    _probe_size: u64,
+    _filename: *const core::ffi::c_char,
+    _total_size: u64,
+) -> u32 {
+    u32::MAX
+}
+
 extern "C" fn stub_create(_services: *const RVService) -> *mut c_void {
     note("create");
     Box::into_raw(Box::new(0_u8)).cast()
@@ -145,6 +192,22 @@ extern "C" fn stub_close(_user_data: *mut c_void) {
 
 extern "C" fn stub_settings_updated(_user_data: *mut c_void, _services: *const RVService) -> u32 {
     SETTINGS_RESULT.with_borrow(|result| *result)
+}
+
+unsafe extern "C" fn stub_metadata(
+    url: *const core::ffi::c_char,
+    services: *const RVService,
+) -> i32 {
+    note("metadata");
+    // SAFETY: the session supplies live service and URL pointers for this call.
+    let service = unsafe { &*services };
+    let get_metadata = service.get_metadata.expect("metadata service");
+    // SAFETY: the service owns the callback context for the duration of this call.
+    let metadata = unsafe { &*get_metadata(service.private_data, 1) };
+    let create_url = metadata.create_url.expect("create_url");
+    // SAFETY: both pointers belong to the live service call.
+    unsafe { create_url(metadata.private_data, url) };
+    METADATA_RESULT.with_borrow(|result| *result)
 }
 
 unsafe extern "C" fn stub_viz_info(_user_data: *mut c_void, out: *mut RVVizInfo) -> bool {
@@ -270,9 +333,122 @@ fn descriptor() -> RVPlaybackPlugin {
     plugin.close = Some(stub_close);
     plugin.read_data = Some(stub_read_data);
     plugin.settings_updated = Some(stub_settings_updated);
+    plugin.metadata = Some(stub_metadata);
     plugin.viz_info = Some(stub_viz_info);
     plugin.scope_enable = Some(stub_scope_enable);
     plugin
+}
+
+#[test]
+fn static_metadata_pass_returns_the_owned_record() {
+    script(Vec::new());
+    with_plugin(|plugin| {
+        let metadata = plugin
+            .metadata("song.mod")
+            .expect("metadata call")
+            .expect("metadata callback");
+        assert_eq!(metadata.url.text, "song.mod");
+        assert_eq!(metadata.subsongs.len(), 1);
+    });
+    assert_eq!(events(), ["static_init", "metadata", "static_destroy"]);
+}
+
+#[test]
+fn failed_metadata_is_discarded_before_the_next_call() {
+    script(Vec::new());
+    with_plugin(|plugin| {
+        METADATA_RESULT.with_borrow_mut(|result| *result = 7);
+        assert!(matches!(
+            plugin.metadata("failed.mod"),
+            Err(SessionError::MetadataFailed(7))
+        ));
+        METADATA_RESULT.with_borrow_mut(|result| *result = 0);
+        let metadata = plugin
+            .metadata("next.mod")
+            .expect("metadata call")
+            .expect("metadata callback");
+        assert_eq!(metadata.url.text, "next.mod");
+        assert_eq!(metadata.subsongs.len(), 1);
+    });
+}
+
+#[test]
+fn missing_metadata_and_invalid_url_are_reported_without_callbacks() {
+    script(Vec::new());
+    let mut no_metadata = descriptor();
+    no_metadata.metadata = None;
+    with_descriptor(no_metadata, |plugin| {
+        assert!(plugin.metadata("song.mod").unwrap().is_none());
+    });
+    with_plugin(|plugin| {
+        assert!(matches!(
+            plugin.metadata("bad\0name"),
+            Err(SessionError::InvalidUrl)
+        ));
+    });
+    assert!(!events().contains(&"metadata"));
+}
+
+#[test]
+fn hosted_selection_uses_supported_then_unsure_and_skips_other_results() {
+    script(Vec::new());
+    let mut unsure = descriptor();
+    unsure.probe_can_play = Some(unsure_probe);
+    let mut supported = descriptor();
+    supported.probe_can_play = Some(supported_probe);
+    let first_host = host();
+    let descriptors = [("unsure", &unsure), ("supported", &supported)];
+    let plugins = PlaybackPlugins::from_descriptors(&descriptors, &first_host);
+    assert_eq!(
+        plugins.select(b"module", "song.mod", 6).unwrap().name(),
+        "supported"
+    );
+    drop(plugins);
+    assert_eq!(
+        events(),
+        [
+            "static_init",
+            "static_init",
+            "static_destroy",
+            "static_destroy"
+        ]
+    );
+
+    script(Vec::new());
+    let mut first_unsure = descriptor();
+    first_unsure.probe_can_play = Some(unsure_probe);
+    let mut second_unsure = descriptor();
+    second_unsure.probe_can_play = Some(unsure_probe);
+    let mut invalid = descriptor();
+    invalid.probe_can_play = Some(invalid_probe);
+    let mut missing = descriptor();
+    missing.probe_can_play = None;
+    let mut unsupported = descriptor();
+    unsupported.probe_can_play = Some(unsupported_probe);
+    let descriptors = [
+        ("invalid", &invalid),
+        ("missing", &missing),
+        ("first", &first_unsure),
+        ("second", &second_unsure),
+        ("unsupported", &unsupported),
+    ];
+    let fallback_host = host();
+    let plugins = PlaybackPlugins::from_descriptors(&descriptors, &fallback_host);
+    assert_eq!(
+        plugins.select(b"module", "song.mod", 6).unwrap().name(),
+        "first"
+    );
+    drop(plugins);
+
+    script(Vec::new());
+    let descriptors = [
+        ("invalid", &invalid),
+        ("missing", &missing),
+        ("unsupported", &unsupported),
+    ];
+    let skipped_host = host();
+    let plugins = PlaybackPlugins::from_descriptors(&descriptors, &skipped_host);
+    assert!(plugins.select(b"module", "song.mod", 6).is_none());
 }
 
 fn host() -> ServiceHost {
@@ -286,7 +462,7 @@ fn host() -> ServiceHost {
 /// Runs `body` against a plugin over `descriptor`, leaving the script alone.
 fn with_descriptor<R>(descriptor: RVPlaybackPlugin, body: impl FnOnce(&Plugin<'_>) -> R) -> R {
     let host = host();
-    let plugin = Plugin::from_descriptor(&descriptor, &host);
+    let plugin = Plugin::from_descriptor("fixture", &descriptor, &host);
     body(&plugin)
 }
 
@@ -920,7 +1096,7 @@ fn a_failed_open_discards_what_it_pushed() {
         push_title(vtable, services.private_data);
     }
 
-    let plugin = Plugin::from_descriptor(&descriptor, &host);
+    let plugin = Plugin::from_descriptor("fixture", &descriptor, &host);
     assert!(plugin.open("song.mod", 0).is_err());
     assert!(
         metadata.take().tags.is_empty(),
