@@ -27,6 +27,9 @@ pub const MAX_TARGET_CHANNELS: u32 = resample::MAX_CHANNELS as u32;
 /// The most channels a plugin may report. Both C hosts accept mono and stereo only.
 const MAX_NATIVE_CHANNELS: u32 = 2;
 
+/// Largest source-to-target rate ratio, covering 384 kHz decoded into an 8 kHz target.
+const MAX_SAMPLE_RATE_RATIO: u32 = 48;
+
 /// Widest sample the ABI defines, in bytes.
 const MAX_SAMPLE_WIDTH: usize = 4;
 
@@ -90,6 +93,12 @@ pub enum AbiViolation {
     ChannelCount(u32),
     #[error("sample_rate 0 cannot define a timebase")]
     ZeroSampleRate,
+    #[error("sample_rate {native} exceeds the {max_ratio}:1 limit against target {target}")]
+    SampleRateRatio {
+        native: u32,
+        target: u32,
+        max_ratio: u32,
+    },
     #[error("format changed from {expected:?} to {found:?}")]
     FormatChanged {
         expected: FormatLock,
@@ -118,6 +127,8 @@ pub enum SessionError {
     ChannelAdaptation { from: u32, to: u32 },
     #[error("read_data() reported an error")]
     Decode,
+    #[error("could not allocate the {0} session buffer")]
+    Allocation(&'static str),
     #[error("ABI violation: {0}")]
     Abi(#[from] AbiViolation),
 }
@@ -333,14 +344,14 @@ impl Player<'_> {
 
         while produced < budget && !self.finished {
             let request = self.source_frames(budget - produced);
-            self.reserve(request, budget);
+            self.reserve(request, budget)?;
 
             let info = self.pull(request);
             let (returned, format, finished) = self.validate(info, request)?;
             if self.lock.is_none() {
                 self.start(format)?;
                 // A resampler may have just appeared, and it needs its slack.
-                self.reserve(request, budget);
+                self.reserve(request, budget)?;
             }
             self.finished |= finished;
             if returned == 0 {
@@ -381,13 +392,13 @@ impl Player<'_> {
     /// Sizes the buffers for one pull. The output buffer holds the budget plus everything
     /// the resampler could produce from this request, so the run always ends at source
     /// exhaustion; whatever lands past the budget rides to the next read.
-    fn reserve(&mut self, request: usize, budget: usize) {
+    fn reserve(&mut self, request: usize, budget: usize) -> Result<(), SessionError> {
         let slack = self
             .resampler
             .as_ref()
             .map_or(0, |resampler| resampler.max_output_frames(request));
         let out_channels = self.out_channels();
-        self.buffers.reserve(request, budget + slack, out_channels);
+        self.buffers.reserve(request, budget + slack, out_channels)
     }
 
     /// Source frames to ask for to fill `wanted` output frames.
@@ -491,6 +502,16 @@ impl Player<'_> {
     /// Locks the format the first chunk reported and sets up the conversion it needs.
     fn start(&mut self, format: FormatLock) -> Result<(), SessionError> {
         if let Some(target) = self.target {
+            if u64::from(format.sample_rate)
+                > u64::from(target.sample_rate) * u64::from(MAX_SAMPLE_RATE_RATIO)
+            {
+                return Err(AbiViolation::SampleRateRatio {
+                    native: format.sample_rate,
+                    target: target.sample_rate,
+                    max_ratio: MAX_SAMPLE_RATE_RATIO,
+                }
+                .into());
+            }
             if !convert::adaptation_supported(format.channels, target.channels) {
                 return Err(SessionError::ChannelAdaptation {
                     from: format.channels,
@@ -586,19 +607,32 @@ struct Buffers {
 }
 
 impl Buffers {
-    fn reserve(&mut self, source_frames: usize, out_frames: usize, out_channels: usize) {
+    fn reserve(
+        &mut self,
+        source_frames: usize,
+        out_frames: usize,
+        out_channels: usize,
+    ) -> Result<(), SessionError> {
         let native = MAX_NATIVE_CHANNELS as usize;
-        grow(&mut self.raw, source_frames * native);
-        grow(&mut self.decoded, source_frames * native);
-        grow(&mut self.adapted, source_frames * out_channels);
-        grow(&mut self.out, out_frames * out_channels);
+        grow(&mut self.raw, source_frames * native, "raw")?;
+        grow(&mut self.decoded, source_frames * native, "decoded")?;
+        grow(&mut self.adapted, source_frames * out_channels, "adapted")?;
+        grow(&mut self.out, out_frames * out_channels, "output")
     }
 }
 
-fn grow<T: Copy + Default>(buffer: &mut Vec<T>, len: usize) {
+fn grow<T: Copy + Default>(
+    buffer: &mut Vec<T>,
+    len: usize,
+    name: &'static str,
+) -> Result<(), SessionError> {
     if buffer.len() < len {
+        buffer
+            .try_reserve_exact(len - buffer.len())
+            .map_err(|_| SessionError::Allocation(name))?;
         buffer.resize(len, T::default());
     }
+    Ok(())
 }
 
 /// Bytes the plugin is told it may write for `frames` frames: the widest it may answer

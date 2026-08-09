@@ -420,6 +420,42 @@ fn a_zero_sample_rate_is_rejected() {
 }
 
 #[test]
+fn an_absurd_native_rate_is_rejected_before_scaled_allocation() {
+    let native = 4_000_000_000;
+    let target = StreamFormat {
+        sample_rate: 48_000,
+        channels: 2,
+    };
+    assert_eq!(
+        read_error(vec![Response::f32(&[], 2, native)], Some(target)),
+        SessionError::Abi(AbiViolation::SampleRateRatio {
+            native,
+            target: target.sample_rate,
+            max_ratio: MAX_SAMPLE_RATE_RATIO,
+        })
+    );
+    assert_eq!(calls().len(), 1);
+    assert_eq!(calls()[0].frames, 4);
+}
+
+#[test]
+fn ordinary_sample_rate_extremes_are_accepted() {
+    for (native, target_rate) in [(384_000, 8_000), (8_000, 384_000)] {
+        let target = StreamFormat {
+            sample_rate: target_rate,
+            channels: 1,
+        };
+        with_player(
+            vec![Response::f32(&[0.0], 1, native)],
+            Some(target),
+            |player| {
+                player.read(4).expect("ordinary rate");
+            },
+        );
+    }
+}
+
+#[test]
 fn channel_counts_outside_mono_and_stereo_are_rejected() {
     for channels in [0, 3, 8] {
         let mut response = Response::f32(&[0.0, 0.0, 0.0, 0.0], 1, 48_000);
@@ -1018,5 +1054,14 @@ fn buffers_survive_a_growing_budget() {
             assert_eq!(player.read(2).expect("read").frames(), 2);
             assert_eq!(player.read(64).expect("read").frames(), 64);
         },
+    );
+}
+
+#[test]
+fn buffer_allocation_failure_is_reported() {
+    let mut buffer = Vec::<u32>::new();
+    assert_eq!(
+        grow(&mut buffer, usize::MAX, "test"),
+        Err(SessionError::Allocation("test"))
     );
 }
