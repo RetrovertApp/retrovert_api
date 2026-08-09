@@ -124,7 +124,7 @@ pub enum LoadError {
     #[error("cannot read path: {0}")]
     Path(#[source] std::io::Error),
     #[error("dlopen failed: {0}")]
-    Open(String),
+    Open(#[source] libloading::Error),
     #[error("no plugin entry point")]
     NoEntryPoint,
     #[error("{0} entry point returned a null descriptor")]
@@ -385,7 +385,7 @@ fn load_one(
     path: &Path,
     seen: &mut HashSet<(PluginKind, String)>,
 ) -> Result<LoadedPlugin, LoadError> {
-    let library = open_library(path).map_err(|error| LoadError::Open(error.to_string()))?;
+    let library = open_library(path).map_err(LoadError::Open)?;
 
     let (kind, descriptor) = entry_point(&library).ok_or(LoadError::NoEntryPoint)?;
     let descriptor = NonNull::new(descriptor).ok_or(LoadError::NullDescriptor(kind))?;
@@ -558,16 +558,29 @@ mod tests {
         assert!(matches!(report.errors[1].source, LoadError::Open(_)));
         assert_eq!(report.errors[1].path, present);
 
-        let reported = report.errors[0].to_string();
-        let cause = std::error::Error::source(&report.errors[0])
+        for error in &report.errors {
+            let reported = error.to_string();
+            let cause = std::error::Error::source(error)
+                .and_then(std::error::Error::source)
+                .expect("the underlying error is the root cause");
+            assert!(reported.contains(&cause.to_string()), "{reported}");
+        }
+
+        let path_cause = std::error::Error::source(&report.errors[0])
             .and_then(std::error::Error::source)
-            .expect("the io error is the root cause")
-            .to_string();
+            .expect("the io error is the root cause");
+        assert!(path_cause.is::<std::io::Error>());
+
+        let open_cause = std::error::Error::source(&report.errors[1])
+            .and_then(std::error::Error::source)
+            .expect("the dlopen error is the root cause");
+        assert!(open_cause.is::<libloading::Error>());
+
+        let path_reported = report.errors[0].to_string();
         assert!(
-            reported.contains(&missing.display().to_string()),
-            "{reported}"
+            path_reported.contains(&missing.display().to_string()),
+            "{path_reported}"
         );
-        assert!(reported.contains(&cause), "{reported}");
     }
 
     #[test]
