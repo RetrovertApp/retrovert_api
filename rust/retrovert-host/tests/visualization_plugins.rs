@@ -1,6 +1,6 @@
 //! Dlopen coverage transferred from retrovert-core's v2 visualization suite.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use retrovert_host::ffi::playback::{RVPlaybackPlugin, RVScrollMode, RVVizCaps};
 use retrovert_host::loader::{load_plugins, PluginKind};
@@ -96,6 +96,17 @@ fn exercise(case: Case) {
         );
         let position = snapshot.position.expect("pattern position");
         let rows = position.window_hi.saturating_sub(position.window_lo) as usize;
+        if matches!(case.name, "libvgm" | "tfmx") {
+            assert_eq!(rows, 64, "{} bounded normalized window", case.name);
+            assert!(
+                snapshot
+                    .channel_rows()
+                    .iter()
+                    .all(|row| *row == position.row),
+                "{} per-channel playheads share the normalized center",
+                case.name
+            );
+        }
         assert_eq!(
             snapshot.cells().len(),
             rows * layout.pattern_channels.len() * layout.columns.len(),
@@ -172,6 +183,50 @@ fn exercise(case: Case) {
     }
 }
 
+fn decode_prefix(plugin_path: &Path, module_path: &Path, budget: u32, frames: usize) -> Vec<f32> {
+    let mut report = load_plugins([plugin_path]);
+    assert!(report.errors.is_empty(), "{:?}", report.errors);
+    let loaded = report
+        .plugins
+        .of_kind_mut(PluginKind::Playback)
+        .next()
+        .expect("playback descriptor");
+    let host = ServiceHost::default();
+    let plugin = Plugin::new(loaded, &host).expect("plugin lifecycle");
+    let player = plugin
+        .open(module_path.to_str().expect("UTF-8 module path"), 0)
+        .expect("open module");
+    let mut player = player.prepare(budget).expect("prepare audio");
+    let mut samples = Vec::new();
+
+    while samples.len() < frames {
+        let chunk = player.read(budget).expect("decode");
+        samples.extend_from_slice(chunk.samples);
+        if chunk.finished || chunk.samples.is_empty() {
+            break;
+        }
+    }
+    samples.truncate(frames);
+    samples
+}
+
+fn assert_small_reads_preserve_audio(
+    plugin_env: &str,
+    plugin_path: &str,
+    module_env: &str,
+    module_path: &str,
+    frames: usize,
+) {
+    let plugin_path = resolved(plugin_env, plugin_path);
+    let module_path = resolved(module_env, module_path);
+    let whole = decode_prefix(&plugin_path, &module_path, frames as u32, frames);
+    let one_at_a_time = decode_prefix(&plugin_path, &module_path, 1, frames);
+    assert_eq!(
+        one_at_a_time, whole,
+        "small reads must preserve every decoded frame"
+    );
+}
+
 macro_rules! viz_case {
     (
         $test:ident, $name:literal, $plugin_env:literal, $plugin_path:literal,
@@ -206,6 +261,30 @@ viz_case!(
     SCOPE,
     None
 );
+
+#[test]
+#[ignore = "requires playback plugin and module fixtures"]
+fn ixalance_small_reads_preserve_audio() {
+    assert_small_reads_preserve_audio(
+        "RV_IXALANCE_SO",
+        "../../../playback-ixalance/build/plugins/ixalance_playback.so",
+        "RV_IXALANCE_MODULE",
+        "../../../../replay_frontend/data/test_data/music/ixalance/test.ixs",
+        113,
+    );
+}
+
+#[test]
+#[ignore = "requires playback plugin and module fixtures"]
+fn spu_small_reads_preserve_audio() {
+    assert_small_reads_preserve_audio(
+        "RV_SPU_SO",
+        "../../../playback-spu/build/plugins/spu_playback.so",
+        "RV_SPU_MODULE",
+        "../../../../replay_frontend/data/test_data/music/spu/test.spu",
+        113,
+    );
+}
 viz_case!(
     art_of_noise,
     "art-of-noise",
@@ -383,8 +462,8 @@ viz_case!(
     "../../../playback-v2m/build/plugins/v2m_playback.so",
     "RV_V2M_MODULE",
     "../../../../replay_frontend/data/test_data/music/v2m/test.v2m",
-    SCOPE,
-    None
+    PATTERN_SCOPE | RVVizCaps::VU,
+    Some(RVScrollMode::Synchronized)
 );
 viz_case!(
     xsf,

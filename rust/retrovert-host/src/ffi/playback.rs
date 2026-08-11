@@ -76,12 +76,14 @@ pub struct RVReadInfo {
     pub status: u32,
 }
 
-/// Destination buffer and resulting info for a `read_data` call.
+/// Destination buffer and input request for a `read_data` call.
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct RVReadData {
     pub channels_output: *mut c_void,
     pub channels_output_max_bytes_size: u32,
+    /// Caller-supplied format hint and maximum requested frame count; status is ignored.
+    /// The plugin returns a separate [`RVReadInfo`] describing what it produced.
     pub info: RVReadInfo,
 }
 
