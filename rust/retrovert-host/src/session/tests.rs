@@ -1143,12 +1143,14 @@ fn a_plugin_without_settings_updated_reports_a_live_change() {
 #[test]
 fn a_plugin_missing_a_playback_callback_cannot_open() {
     script(Vec::new());
-    for name in ["create", "open", "read_data"] {
+    for name in ["create", "open", "read_data", "close", "destroy"] {
         let mut descriptor = descriptor();
         match name {
             "create" => descriptor.create = None,
             "open" => descriptor.open = None,
-            _ => descriptor.read_data = None,
+            "read_data" => descriptor.read_data = None,
+            "close" => descriptor.close = None,
+            _ => descriptor.destroy = None,
         }
         with_descriptor(descriptor, |plugin| {
             assert_eq!(

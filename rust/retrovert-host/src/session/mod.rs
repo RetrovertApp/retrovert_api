@@ -8,9 +8,11 @@ mod convert;
 mod resample;
 
 use core::ffi::c_void;
+use core::marker::PhantomData;
 use core::ops::{Deref, DerefMut};
 use core::ptr::NonNull;
 use std::ffi::CString;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use crate::ffi::audio_format::{RVAudioFormat, RVAudioStreamFormat};
@@ -233,61 +235,71 @@ impl<'a> Plugin<'a> {
         subsong: u32,
         target: Option<StreamFormat>,
     ) -> Result<Player<'_>, SessionError> {
-        if let Some(target) = target {
-            if target.sample_rate == 0
-                || target.channels == 0
-                || target.channels > MAX_TARGET_CHANNELS
-            {
-                return Err(SessionError::InvalidTarget(target));
-            }
-        }
-        let create = self
-            .plugin
-            .create
-            .ok_or(SessionError::MissingCallback("create"))?;
-        let open = self
-            .plugin
-            .open
-            .ok_or(SessionError::MissingCallback("open"))?;
-        let read_data = self
-            .plugin
-            .read_data
-            .ok_or(SessionError::MissingCallback("read_data"))?;
-        let url = CString::new(url).map_err(|_| SessionError::InvalidUrl)?;
-
-        // SAFETY: the service locator stays live for the whole instance lifetime.
-        let instance = unsafe { create(self.service) };
-        let instance = NonNull::new(instance).ok_or(SessionError::CreateFailed)?;
-
-        // Owned from here on, so a failed open still destroys the instance.
-        let mut player = Player {
-            plugin: self.plugin,
-            service: self.service,
-            instance,
-            read_data,
-            opened: false,
-            target,
-            lock: None,
-            pipeline: None,
-            resampler: None,
-            finished: false,
-            carry: 0,
-            carry_at: 0,
-            buffers: Buffers::default(),
-            visualization: VisualizationState::Unprepared,
-        };
-
-        // SAFETY: the instance came from this plugin's `create`, and both the url and
-        // the service outlive the call.
-        let result = unsafe { open(instance.as_ptr(), url.as_ptr(), subsong, self.service) };
-        if result != 0 {
-            // A failed open still pushed whatever it got to; the next song must not see it.
+        let player = open_player(*self.plugin, self.service, url, subsong, target);
+        if matches!(player, Err(SessionError::OpenFailed(_))) {
             self.metadata.discard();
-            return Err(SessionError::OpenFailed(result));
         }
-        player.opened = true;
-        Ok(player)
+        player
     }
+}
+
+fn open_player<'a>(
+    plugin: RVPlaybackPlugin,
+    service: *const RVService,
+    url: &str,
+    subsong: u32,
+    target: Option<StreamFormat>,
+) -> Result<Player<'a>, SessionError> {
+    if let Some(target) = target {
+        if target.sample_rate == 0 || target.channels == 0 || target.channels > MAX_TARGET_CHANNELS
+        {
+            return Err(SessionError::InvalidTarget(target));
+        }
+    }
+    let create = plugin
+        .create
+        .ok_or(SessionError::MissingCallback("create"))?;
+    let open = plugin.open.ok_or(SessionError::MissingCallback("open"))?;
+    let read_data = plugin
+        .read_data
+        .ok_or(SessionError::MissingCallback("read_data"))?;
+    plugin.close.ok_or(SessionError::MissingCallback("close"))?;
+    plugin
+        .destroy
+        .ok_or(SessionError::MissingCallback("destroy"))?;
+    let url = CString::new(url).map_err(|_| SessionError::InvalidUrl)?;
+
+    // SAFETY: the service locator stays live for the whole instance lifetime.
+    let instance = unsafe { create(service) };
+    let instance = NonNull::new(instance).ok_or(SessionError::CreateFailed)?;
+
+    // Owned from here on, so a failed open still destroys the instance.
+    let mut player = Player {
+        plugin,
+        service,
+        instance,
+        read_data,
+        opened: false,
+        target,
+        lock: None,
+        pipeline: None,
+        resampler: None,
+        finished: false,
+        carry: 0,
+        carry_at: 0,
+        buffers: Buffers::default(),
+        visualization: VisualizationState::Unprepared,
+        lifetime: PhantomData,
+    };
+
+    // SAFETY: the instance came from this plugin's `create`, and both the url and
+    // the service outlive the call.
+    let result = unsafe { open(instance.as_ptr(), url.as_ptr(), subsong, service) };
+    if result != 0 {
+        return Err(SessionError::OpenFailed(result));
+    }
+    player.opened = true;
+    Ok(player)
 }
 
 /// Playback plugins initialized against one host and kept live through selection and use.
@@ -329,6 +341,291 @@ impl<'a> PlaybackPlugins<'a> {
     }
 }
 
+/// An owned playback catalog whose libraries and services outlive every session.
+#[derive(Clone)]
+pub struct OwnedPlaybackRuntime {
+    inner: Rc<RuntimeInner>,
+}
+
+struct RuntimeInner {
+    plugins: Box<[OwnedPluginEntry]>,
+    _loaded: PluginSet,
+    host: ServiceHost,
+}
+
+struct OwnedPluginEntry {
+    index: usize,
+    name: String,
+    plugin: RVPlaybackPlugin,
+}
+
+impl OwnedPlaybackRuntime {
+    pub fn new(loaded: PluginSet, host: ServiceHost) -> Self {
+        let service = host.service();
+        let plugins = loaded
+            .of_kind(PluginKind::Playback)
+            .enumerate()
+            .map(|(index, loaded)| {
+                let plugin = *loaded
+                    .playback()
+                    .expect("playback kind has a playback descriptor");
+                if let Some(static_init) = plugin.static_init {
+                    // SAFETY: the descriptor stays mapped and the host stays live in the
+                    // runtime until the matching static teardown.
+                    unsafe { static_init(service) };
+                }
+                OwnedPluginEntry {
+                    index,
+                    name: loaded.name().to_owned(),
+                    plugin,
+                }
+            })
+            .collect();
+        Self {
+            inner: Rc::new(RuntimeInner {
+                plugins,
+                _loaded: loaded,
+                host,
+            }),
+        }
+    }
+
+    /// The first supported plugin wins; the first unsure plugin is the fallback.
+    pub fn select(
+        &self,
+        data: &[u8],
+        filename: &str,
+        total_size: u64,
+    ) -> Option<OwnedPlaybackPlugin> {
+        let entry = crate::loader::select_playback_candidate(
+            &self.inner.plugins,
+            |entry| Some(&entry.plugin),
+            data,
+            filename,
+            total_size,
+        )?;
+        Some(OwnedPlaybackPlugin {
+            runtime: self.clone(),
+            index: entry.index,
+        })
+    }
+}
+
+impl core::fmt::Debug for OwnedPlaybackRuntime {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("OwnedPlaybackRuntime")
+            .field("playback_plugins", &self.inner.plugins.len())
+            .finish_non_exhaustive()
+    }
+}
+
+impl Drop for RuntimeInner {
+    fn drop(&mut self) {
+        for entry in &self.plugins {
+            if let Some(static_destroy) = entry.plugin.static_destroy {
+                // SAFETY: the last runtime keepalive is dropping, so no instance can
+                // remain, and the descriptor's library is still mapped.
+                unsafe { static_destroy() };
+            }
+        }
+        // Fields then drop in declaration order: descriptors, libraries, host.
+    }
+}
+
+/// A stable selection from an [`OwnedPlaybackRuntime`].
+#[derive(Clone)]
+pub struct OwnedPlaybackPlugin {
+    runtime: OwnedPlaybackRuntime,
+    index: usize,
+}
+
+impl OwnedPlaybackPlugin {
+    fn entry(&self) -> &OwnedPluginEntry {
+        &self.runtime.inner.plugins[self.index]
+    }
+
+    pub fn name(&self) -> &str {
+        &self.entry().name
+    }
+
+    /// Runs the selected plugin's static metadata pass.
+    pub fn metadata(&self, url: &str) -> Result<Option<TrackMetadata>, SessionError> {
+        let entry = self.entry();
+        let Some(metadata) = entry.plugin.metadata else {
+            return Ok(None);
+        };
+        let url = CString::new(url).map_err(|_| SessionError::InvalidUrl)?;
+        let handle = self.runtime.inner.host.metadata();
+        handle.discard();
+        // SAFETY: the URL is live for the call and the runtime keeps the service and
+        // plugin library alive.
+        let result = unsafe { metadata(url.as_ptr(), self.runtime.inner.host.service()) };
+        if result != 0 {
+            handle.discard();
+            return Err(SessionError::MetadataFailed(result));
+        }
+        Ok(Some(handle.take()))
+    }
+
+    /// Opens and prepares an owned native-format session.
+    pub fn open_prepared(
+        &self,
+        url: &str,
+        subsong: u32,
+        max_frames: u32,
+        visualization: Option<VisualizationConfig>,
+    ) -> Result<OwnedPreparedSession, OwnedSessionError> {
+        self.open_prepared_inner(url, subsong, None, max_frames, visualization)
+    }
+
+    /// Drops `current` before opening and installing its replacement.
+    pub fn replace_prepared(
+        &self,
+        current: &mut Option<OwnedPreparedSession>,
+        url: &str,
+        subsong: u32,
+        max_frames: u32,
+        visualization: Option<VisualizationConfig>,
+    ) -> Result<(), OwnedSessionError> {
+        *current = None;
+        *current = Some(self.open_prepared(url, subsong, max_frames, visualization)?);
+        Ok(())
+    }
+
+    /// Opens and prepares an owned mixer-format session.
+    pub fn open_prepared_with_target(
+        &self,
+        url: &str,
+        subsong: u32,
+        target: StreamFormat,
+        max_frames: u32,
+        visualization: Option<VisualizationConfig>,
+    ) -> Result<OwnedPreparedSession, OwnedSessionError> {
+        self.open_prepared_inner(url, subsong, Some(target), max_frames, visualization)
+    }
+
+    /// Drops `current` before opening and installing its mixer-format replacement.
+    pub fn replace_prepared_with_target(
+        &self,
+        current: &mut Option<OwnedPreparedSession>,
+        url: &str,
+        subsong: u32,
+        target: StreamFormat,
+        max_frames: u32,
+        visualization: Option<VisualizationConfig>,
+    ) -> Result<(), OwnedSessionError> {
+        *current = None;
+        *current = Some(self.open_prepared_with_target(
+            url,
+            subsong,
+            target,
+            max_frames,
+            visualization,
+        )?);
+        Ok(())
+    }
+
+    fn open_prepared_inner(
+        &self,
+        url: &str,
+        subsong: u32,
+        target: Option<StreamFormat>,
+        max_frames: u32,
+        visualization: Option<VisualizationConfig>,
+    ) -> Result<OwnedPreparedSession, OwnedSessionError> {
+        let entry = self.entry();
+        let service = self.runtime.inner.host.service();
+        let mut player =
+            open_player(entry.plugin, service, url, subsong, target).map_err(|error| {
+                if matches!(error, SessionError::OpenFailed(_)) {
+                    self.runtime.inner.host.metadata().discard();
+                }
+                OwnedSessionError::Session(error)
+            })?;
+        let layout = visualization
+            .map(|config| player.prepare_visualization(config))
+            .transpose()?
+            .flatten();
+        let player = player.prepare(max_frames)?;
+        Ok(OwnedPreparedSession {
+            player,
+            runtime: self.runtime.clone(),
+            layout,
+        })
+    }
+}
+
+impl core::fmt::Debug for OwnedPlaybackPlugin {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("OwnedPlaybackPlugin")
+            .field("name", &self.name())
+            .finish_non_exhaustive()
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum OwnedSessionError {
+    #[error(transparent)]
+    Session(#[from] SessionError),
+    #[error(transparent)]
+    Visualization(#[from] VisualizationError),
+}
+
+/// A prepared decoder session that keeps its runtime alive.
+pub struct OwnedPreparedSession {
+    player: PreparedPlayer<'static>,
+    runtime: OwnedPlaybackRuntime,
+    layout: Option<Arc<VizLayout>>,
+}
+
+impl OwnedPreparedSession {
+    pub const fn max_frames(&self) -> u32 {
+        self.player.max_frames()
+    }
+
+    pub fn layout(&self) -> Option<&Arc<VizLayout>> {
+        self.layout.as_ref()
+    }
+
+    pub fn read(&mut self, frames: u32) -> Result<Chunk<'_>, SessionError> {
+        self.player.read(frames)
+    }
+
+    pub fn capture_visualization(
+        &mut self,
+        output_frame: u64,
+        snapshot: &mut VizSnapshot,
+    ) -> Result<(), VisualizationError> {
+        self.player.capture_visualization(output_frame, snapshot)
+    }
+
+    pub fn set_scope_enabled(&mut self, enabled: bool) {
+        self.player.set_scope_enabled(enabled);
+    }
+
+    pub fn native_format(&self) -> Option<FormatLock> {
+        self.player.native_format()
+    }
+
+    pub fn format(&self) -> StreamFormat {
+        self.player.format()
+    }
+
+    pub fn settings_updated(&mut self) -> RVSettingsUpdate {
+        self.player.settings_updated()
+    }
+}
+
+impl core::fmt::Debug for OwnedPreparedSession {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("OwnedPreparedSession")
+            .field("max_frames", &self.max_frames())
+            .field("runtime", &self.runtime)
+            .field("has_visualization", &self.layout.is_some())
+            .finish()
+    }
+}
+
 impl Drop for Plugin<'_> {
     fn drop(&mut self) {
         if let Some(static_destroy) = self.plugin.static_destroy {
@@ -341,8 +638,8 @@ impl Drop for Plugin<'_> {
 
 /// One open song. Dropping it closes the song and destroys the instance.
 pub struct Player<'a> {
-    plugin: &'a RVPlaybackPlugin,
-    service: &'a RVService,
+    plugin: RVPlaybackPlugin,
+    service: *const RVService,
     instance: NonNull<c_void>,
     read_data: ReadDataFn,
     opened: bool,
@@ -356,6 +653,7 @@ pub struct Player<'a> {
     carry_at: usize,
     buffers: Buffers,
     visualization: VisualizationState,
+    lifetime: PhantomData<&'a RVService>,
 }
 
 enum VisualizationState {
@@ -448,7 +746,7 @@ impl<'a> Player<'a> {
             VisualizationState::Unprepared => {}
         }
 
-        let layout = visualization::prepare_layout(self.plugin, self.instance.as_ptr(), config)?;
+        let layout = visualization::prepare_layout(&self.plugin, self.instance.as_ptr(), config)?;
         self.visualization = match &layout {
             Some(layout) => VisualizationState::Ready(Arc::clone(layout)),
             None => VisualizationState::Absent(config),
@@ -466,7 +764,7 @@ impl<'a> Player<'a> {
             return Err(VisualizationError::NotPrepared);
         };
         visualization::capture_snapshot(
-            self.plugin,
+            &self.plugin,
             self.instance.as_ptr(),
             layout,
             output_frame,
