@@ -702,6 +702,32 @@ mod tests {
     }
 
     #[test]
+    fn mismatched_union_storage_with_an_invalid_boolean_byte_is_skipped() {
+        let captured = Arc::new(CapturingLog::default());
+        let host = with_log(captured.clone());
+        let mut settings = [RVSetting {
+            int_value: RVSInteger {
+                widget_id: c"amiga".as_ptr(),
+                name: c"Amiga Resampling".as_ptr(),
+                desc: c"".as_ptr(),
+                widget_type: RVS_BOOL_TYPE,
+                value: 2,
+                start_range: 0,
+                end_range: 0,
+            },
+        }];
+
+        assert_eq!(
+            register(&host, c"openmpt", &mut settings),
+            RVSettingsResult::Ok as u32
+        );
+        assert!(host.settings().schemas("openmpt").is_empty());
+        let lines = captured.lines.lock().expect("log lines");
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(lines[0].contains("invalid Boolean byte 2"), "{lines:?}");
+    }
+
+    #[test]
     fn the_abi_reports_a_duplicate_a_missing_module_an_unknown_id_and_a_wrong_type_apart() {
         let mut int_choices = [];
         let mut str_choices = [];

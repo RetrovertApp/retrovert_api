@@ -11,11 +11,11 @@ use std::ffi::CString;
 use std::sync::{Arc, Mutex};
 
 use crate::ffi::settings::{
-    RVSBase, RVSBool, RVSBoolResult, RVSFloat, RVSFloatResult, RVSIntResult, RVSInteger,
+    RVSBase, RVSBoolResult, RVSBoolWire, RVSFloat, RVSFloatResult, RVSIntResult, RVSInteger,
     RVSIntegerFixedRange, RVSIntegerRangeValue, RVSStringFixedRange, RVSStringRangeValue,
-    RVSStringResult, RVSetting, RVSettingsResult, RVS_BOOL_TYPE, RVS_CHOICE_COUNT_LIMIT,
-    RVS_FLOAT_TYPE, RVS_INTEGER_RANGE_TYPE, RVS_INTEGER_TYPE, RVS_STRING_RANGE_TYPE,
-    RV_SETTINGS_COUNT_LIMIT,
+    RVSStringResult, RVSetting, RVSettingWire, RVSettingsResult, RVS_BOOL_TYPE,
+    RVS_CHOICE_COUNT_LIMIT, RVS_FLOAT_TYPE, RVS_INTEGER_RANGE_TYPE, RVS_INTEGER_TYPE,
+    RVS_STRING_RANGE_TYPE, RV_SETTINGS_COUNT_LIMIT,
 };
 use crate::service::log::{Log, LogLevel};
 use crate::service::{context, guard, lock, plugin_str};
@@ -32,6 +32,28 @@ fn checked_array_count<T>(count: u64, limit: u64) -> Option<usize> {
     let count = usize::try_from(count).ok()?;
     core::alloc::Layout::array::<T>(count).ok()?;
     Some(count)
+}
+
+#[derive(Clone, Copy)]
+enum SettingKind {
+    Float,
+    Int,
+    Bool,
+    IntChoice,
+    StrChoice,
+}
+
+impl SettingKind {
+    fn from_wire(value: u64) -> Option<Self> {
+        match value {
+            RVS_FLOAT_TYPE => Some(Self::Float),
+            RVS_INTEGER_TYPE => Some(Self::Int),
+            RVS_BOOL_TYPE => Some(Self::Bool),
+            RVS_INTEGER_RANGE_TYPE => Some(Self::IntChoice),
+            RVS_STRING_RANGE_TYPE => Some(Self::StrChoice),
+            _ => None,
+        }
+    }
 }
 
 /// One entry of a fixed-range setting: a display name for a value.
@@ -564,8 +586,9 @@ impl SettingsHandle {
 ///
 /// # Safety
 ///
-/// `settings` must be null, or address `count` initialized [`RVSetting`] values whose string
-/// and choice-array pointers are readable for their whole lengths.
+/// `settings` must be null, or address `count` readable C [`RVSetting`] objects. Each object must
+/// have an initialized common header and initialized wire fields for the variant named by its tag;
+/// string and choice-array pointers must be readable for their whole lengths.
 unsafe fn read_schemas(
     log: &dyn Log,
     reg_id: &str,
@@ -579,11 +602,26 @@ unsafe fn read_schemas(
     }
 
     let mut schemas = Vec::with_capacity(count);
+    let settings = settings.cast::<RVSettingWire>();
     for index in 0..count {
-        // SAFETY: the caller guarantees `count` initialized values from `settings`.
+        // SAFETY: the validated count and caller-provided array cover this element.
         let entry = unsafe { settings.add(index) };
-        // SAFETY: every union member starts with the fields of `RVSBase`.
+        // SAFETY: the caller provides an initialized common header.
         let base = unsafe { entry.cast::<RVSBase>().read() };
+        let Some(kind) = SettingKind::from_wire(base.widget_type) else {
+            // SAFETY: the caller guarantees a readable id string.
+            let id = unsafe { plugin_str(base.widget_id) }.unwrap_or_default();
+            log.log(
+                LogLevel::Warn,
+                None,
+                0,
+                &format!(
+                    "'{reg_id}.{id}' has unknown widget type {:#x}; skipped",
+                    base.widget_type
+                ),
+            );
+            continue;
+        };
         // SAFETY: the caller guarantees readable strings.
         let (id, name, desc) = unsafe {
             (
@@ -602,58 +640,67 @@ unsafe fn read_schemas(
             continue;
         };
 
-        // SAFETY: `widget_type` names the union member the plugin initialized, and every
-        // member of a `#[repr(C)]` union starts at the union's own address.
-        let setting = unsafe {
-            match base.widget_type {
-                RVS_FLOAT_TYPE => {
+        let setting = match kind {
+            SettingKind::Float => {
+                // SAFETY: the validated tag and caller contract establish float wire fields.
+                unsafe {
                     let raw = entry.cast::<RVSFloat>().read();
-                    Some(Setting::Float {
+                    Setting::Float {
                         value: raw.value,
                         start_range: raw.start_range,
                         end_range: raw.end_range,
-                    })
+                    }
                 }
-                RVS_INTEGER_TYPE => {
+            }
+            SettingKind::Int => {
+                // SAFETY: the validated tag and caller contract establish integer wire fields.
+                unsafe {
                     let raw = entry.cast::<RVSInteger>().read();
-                    Some(Setting::Int {
+                    Setting::Int {
                         value: raw.value,
                         start_range: raw.start_range,
                         end_range: raw.end_range,
-                    })
+                    }
                 }
-                RVS_BOOL_TYPE => Some(Setting::Bool {
-                    value: entry.cast::<RVSBool>().read().value,
-                }),
-                RVS_INTEGER_RANGE_TYPE => {
+            }
+            SettingKind::Bool => {
+                // SAFETY: the validated tag and caller contract establish Boolean wire fields.
+                let raw = unsafe { entry.cast::<RVSBoolWire>().read() };
+                let value = match raw.value {
+                    0 => false,
+                    1 => true,
+                    invalid => {
+                        log.log(
+                            LogLevel::Warn,
+                            None,
+                            0,
+                            &format!("'{reg_id}.{id}' has invalid Boolean byte {invalid}; skipped"),
+                        );
+                        continue;
+                    }
+                };
+                Setting::Bool { value }
+            }
+            SettingKind::IntChoice => {
+                // SAFETY: the validated tag and caller contract establish integer-choice fields.
+                unsafe {
                     let raw = entry.cast::<RVSIntegerFixedRange>().read();
-                    Some(Setting::IntChoice {
+                    Setting::IntChoice {
                         value: raw.value,
                         choices: read_int_choices(raw.values, raw.values_size)?,
-                    })
+                    }
                 }
-                RVS_STRING_RANGE_TYPE => {
+            }
+            SettingKind::StrChoice => {
+                // SAFETY: the validated tag and caller contract establish string-choice fields.
+                unsafe {
                     let raw = entry.cast::<RVSStringFixedRange>().read();
-                    Some(Setting::StrChoice {
+                    Setting::StrChoice {
                         value: plugin_str(raw.value).unwrap_or_default().into_owned(),
                         choices: read_str_choices(raw.values, raw.values_size)?,
-                    })
+                    }
                 }
-                _ => None,
             }
-        };
-
-        let Some(setting) = setting else {
-            log.log(
-                LogLevel::Warn,
-                None,
-                0,
-                &format!(
-                    "'{reg_id}.{id}' has unknown widget type {:#x}; skipped",
-                    base.widget_type
-                ),
-            );
-            continue;
         };
 
         schemas.push(SettingSchema {

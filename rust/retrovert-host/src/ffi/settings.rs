@@ -72,6 +72,17 @@ pub struct RVSBool {
     pub value: bool,
 }
 
+/// Plugin-controlled Boolean storage before validation as a Rust [`bool`].
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct RVSBoolWire {
+    pub widget_id: *const c_char,
+    pub name: *const c_char,
+    pub desc: *const c_char,
+    pub widget_type: u64,
+    pub value: u8,
+}
+
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct RVSIntegerRangeValue {
@@ -149,6 +160,23 @@ pub union RVSetting {
     pub string_fixed_value: RVSStringFixedRange,
     pub bool_value: RVSBool,
 }
+
+/// Wire-safe view of [`RVSetting`]; every field accepts all scalar bit patterns.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub(crate) union RVSettingWire {
+    pub base: RVSBase,
+    pub int_value: RVSInteger,
+    pub float_value: RVSFloat,
+    pub int_fixed_value: RVSIntegerFixedRange,
+    pub string_fixed_value: RVSStringFixedRange,
+    pub bool_value: RVSBoolWire,
+}
+
+const _: () = assert!(core::mem::size_of::<RVSettingWire>() == core::mem::size_of::<RVSetting>());
+const _: () = assert!(core::mem::align_of::<RVSettingWire>() == core::mem::align_of::<RVSetting>());
+const _: () = assert!(core::mem::size_of::<RVSBoolWire>() == core::mem::size_of::<RVSBool>());
+const _: () = assert!(core::mem::align_of::<RVSBoolWire>() == core::mem::align_of::<RVSBool>());
 
 /// Settings registration and lookup the host exposes to plugins.
 #[repr(C)]
