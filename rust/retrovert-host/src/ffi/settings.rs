@@ -9,6 +9,11 @@ pub const RVS_BOOL_TYPE: u64 = 0x1002;
 pub const RVS_INTEGER_RANGE_TYPE: u64 = 0x1003;
 pub const RVS_STRING_RANGE_TYPE: u64 = 0x1004;
 
+/// Maximum number of settings accepted in one registration.
+pub const RV_SETTINGS_COUNT_LIMIT: u64 = 1024;
+/// Maximum number of choices accepted by one fixed-range setting.
+pub const RVS_CHOICE_COUNT_LIMIT: u64 = 1024;
+
 pub const RV_SETTINGS_API_VERSION: c_int = 1;
 
 abi_enum! {
@@ -19,6 +24,7 @@ abi_enum! {
         UnknownId = 2,
         DuplicatedId = 3,
         WrongType = 4,
+        InvalidCount = 5,
     }
 }
 

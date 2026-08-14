@@ -13,11 +13,26 @@ use std::sync::{Arc, Mutex};
 use crate::ffi::settings::{
     RVSBase, RVSBool, RVSBoolResult, RVSFloat, RVSFloatResult, RVSIntResult, RVSInteger,
     RVSIntegerFixedRange, RVSIntegerRangeValue, RVSStringFixedRange, RVSStringRangeValue,
-    RVSStringResult, RVSetting, RVSettingsResult, RVS_BOOL_TYPE, RVS_FLOAT_TYPE,
-    RVS_INTEGER_RANGE_TYPE, RVS_INTEGER_TYPE, RVS_STRING_RANGE_TYPE,
+    RVSStringResult, RVSetting, RVSettingsResult, RVS_BOOL_TYPE, RVS_CHOICE_COUNT_LIMIT,
+    RVS_FLOAT_TYPE, RVS_INTEGER_RANGE_TYPE, RVS_INTEGER_TYPE, RVS_STRING_RANGE_TYPE,
+    RV_SETTINGS_COUNT_LIMIT,
 };
 use crate::service::log::{Log, LogLevel};
 use crate::service::{context, guard, lock, plugin_str};
+
+/// Maximum number of settings accepted in one plugin registration.
+pub const SETTINGS_COUNT_LIMIT: u64 = RV_SETTINGS_COUNT_LIMIT;
+/// Maximum number of choices accepted by one fixed-range setting.
+pub const SETTING_CHOICE_COUNT_LIMIT: u64 = RVS_CHOICE_COUNT_LIMIT;
+
+fn checked_array_count<T>(count: u64, limit: u64) -> Option<usize> {
+    if count > limit {
+        return None;
+    }
+    let count = usize::try_from(count).ok()?;
+    core::alloc::Layout::array::<T>(count).ok()?;
+    Some(count)
+}
 
 /// One entry of a fixed-range setting: a display name for a value.
 #[derive(Debug, Clone, PartialEq)]
@@ -556,15 +571,17 @@ unsafe fn read_schemas(
     reg_id: &str,
     settings: *mut RVSetting,
     count: u64,
-) -> Vec<SettingSchema> {
+) -> Result<Vec<SettingSchema>, RVSettingsResult> {
+    let count = checked_array_count::<RVSetting>(count, SETTINGS_COUNT_LIMIT)
+        .ok_or(RVSettingsResult::InvalidCount)?;
     if settings.is_null() {
-        return Vec::new();
+        return Ok(Vec::new());
     }
 
-    let mut schemas = Vec::new();
+    let mut schemas = Vec::with_capacity(count);
     for index in 0..count {
         // SAFETY: the caller guarantees `count` initialized values from `settings`.
-        let entry = unsafe { settings.add(index as usize) };
+        let entry = unsafe { settings.add(index) };
         // SAFETY: every union member starts with the fields of `RVSBase`.
         let base = unsafe { entry.cast::<RVSBase>().read() };
         // SAFETY: the caller guarantees readable strings.
@@ -612,14 +629,14 @@ unsafe fn read_schemas(
                     let raw = entry.cast::<RVSIntegerFixedRange>().read();
                     Some(Setting::IntChoice {
                         value: raw.value,
-                        choices: read_int_choices(raw.values, raw.values_size),
+                        choices: read_int_choices(raw.values, raw.values_size)?,
                     })
                 }
                 RVS_STRING_RANGE_TYPE => {
                     let raw = entry.cast::<RVSStringFixedRange>().read();
                     Some(Setting::StrChoice {
                         value: plugin_str(raw.value).unwrap_or_default().into_owned(),
-                        choices: read_str_choices(raw.values, raw.values_size),
+                        choices: read_str_choices(raw.values, raw.values_size)?,
                     })
                 }
                 _ => None,
@@ -646,19 +663,24 @@ unsafe fn read_schemas(
             setting,
         });
     }
-    schemas
+    Ok(schemas)
 }
 
 /// # Safety
 ///
 /// `values` must be null, or address `count` initialized entries whose names are readable.
-unsafe fn read_int_choices(values: *mut RVSIntegerRangeValue, count: u64) -> Vec<Choice<i32>> {
+unsafe fn read_int_choices(
+    values: *mut RVSIntegerRangeValue,
+    count: u64,
+) -> Result<Vec<Choice<i32>>, RVSettingsResult> {
+    let count = checked_array_count::<RVSIntegerRangeValue>(count, SETTING_CHOICE_COUNT_LIMIT)
+        .ok_or(RVSettingsResult::InvalidCount)?;
     if values.is_null() {
-        return Vec::new();
+        return Ok(Vec::new());
     }
     // SAFETY: the caller guarantees `count` initialized entries from `values`.
-    let entries = unsafe { core::slice::from_raw_parts(values, count as usize) };
-    entries
+    let entries = unsafe { core::slice::from_raw_parts(values, count) };
+    Ok(entries
         .iter()
         .filter_map(|entry| {
             // SAFETY: the caller guarantees a readable name.
@@ -668,19 +690,24 @@ unsafe fn read_int_choices(values: *mut RVSIntegerRangeValue, count: u64) -> Vec
                 value: entry.value,
             })
         })
-        .collect()
+        .collect())
 }
 
 /// # Safety
 ///
 /// `values` must be null, or address `count` initialized entries whose strings are readable.
-unsafe fn read_str_choices(values: *mut RVSStringRangeValue, count: u64) -> Vec<Choice<String>> {
+unsafe fn read_str_choices(
+    values: *mut RVSStringRangeValue,
+    count: u64,
+) -> Result<Vec<Choice<String>>, RVSettingsResult> {
+    let count = checked_array_count::<RVSStringRangeValue>(count, SETTING_CHOICE_COUNT_LIMIT)
+        .ok_or(RVSettingsResult::InvalidCount)?;
     if values.is_null() {
-        return Vec::new();
+        return Ok(Vec::new());
     }
     // SAFETY: the caller guarantees `count` initialized entries from `values`.
-    let entries = unsafe { core::slice::from_raw_parts(values, count as usize) };
-    entries
+    let entries = unsafe { core::slice::from_raw_parts(values, count) };
+    Ok(entries
         .iter()
         .filter_map(|entry| {
             // SAFETY: the caller guarantees readable strings.
@@ -690,7 +717,7 @@ unsafe fn read_str_choices(values: *mut RVSStringRangeValue, count: u64) -> Vec<
                 value: value.into_owned(),
             })
         })
-        .collect()
+        .collect())
 }
 
 /// # Safety
@@ -710,7 +737,10 @@ pub(super) unsafe extern "C" fn reg(
             return RVSettingsResult::NotFound as u32;
         };
         // SAFETY: the caller guarantees the settings array.
-        let schemas = unsafe { read_schemas(&*ctx.log, &reg_id, settings, settings_size) };
+        let schemas = match unsafe { read_schemas(&*ctx.log, &reg_id, settings, settings_size) } {
+            Ok(schemas) => schemas,
+            Err(result) => return result as u32,
+        };
 
         match ctx.settings.register(&reg_id, schemas) {
             Ok(()) => RVSettingsResult::Ok as u32,
@@ -867,6 +897,55 @@ pub(super) unsafe extern "C" fn get_bool(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn array_counts_are_bounded_by_service_platform_and_element_limits() {
+        assert_eq!(
+            checked_array_count::<RVSetting>(0, SETTINGS_COUNT_LIMIT),
+            Some(0)
+        );
+        assert_eq!(
+            checked_array_count::<RVSetting>(SETTINGS_COUNT_LIMIT, SETTINGS_COUNT_LIMIT),
+            usize::try_from(SETTINGS_COUNT_LIMIT).ok()
+        );
+        assert_eq!(
+            checked_array_count::<RVSetting>(SETTINGS_COUNT_LIMIT + 1, SETTINGS_COUNT_LIMIT),
+            None
+        );
+        assert_eq!(checked_array_count::<RVSetting>(u64::MAX, u64::MAX), None);
+        assert_eq!(
+            checked_array_count::<RVSIntegerRangeValue>(
+                SETTING_CHOICE_COUNT_LIMIT + 1,
+                SETTING_CHOICE_COUNT_LIMIT,
+            ),
+            None
+        );
+        assert_eq!(
+            checked_array_count::<RVSStringRangeValue>(
+                SETTING_CHOICE_COUNT_LIMIT + 1,
+                SETTING_CHOICE_COUNT_LIMIT,
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn rejected_choice_counts_are_not_traversed_or_allocated() {
+        let int_values = core::ptr::NonNull::<RVSIntegerRangeValue>::dangling().as_ptr();
+        let str_values = core::ptr::NonNull::<RVSStringRangeValue>::dangling().as_ptr();
+
+        crate::test_alloc::assert_no_alloc(|| {
+            // SAFETY: an invalid count must be rejected before the dangling pointer is read.
+            let int_result = unsafe {
+                read_int_choices(int_values, SETTING_CHOICE_COUNT_LIMIT.saturating_add(1))
+            };
+            assert_eq!(int_result, Err(RVSettingsResult::InvalidCount));
+
+            // SAFETY: an invalid count must be rejected before the dangling pointer is read.
+            let str_result = unsafe { read_str_choices(str_values, u64::MAX) };
+            assert_eq!(str_result, Err(RVSettingsResult::InvalidCount));
+        });
+    }
 
     /// Records what the registry asked the store to do, and replays a canned load.
     #[derive(Default)]

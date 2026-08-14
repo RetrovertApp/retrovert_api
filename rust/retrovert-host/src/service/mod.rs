@@ -18,7 +18,8 @@ pub use metadata::{
 };
 pub use settings::{
     Choice, MemorySettingsStore, Setting, SettingSchema, SettingsError, SettingsHandle,
-    SettingsStore, SettingsUpdate, StoredValue, Value,
+    SettingsStore, SettingsUpdate, StoredValue, Value, SETTINGS_COUNT_LIMIT,
+    SETTING_CHOICE_COUNT_LIMIT,
 };
 
 use core::ffi::{c_char, c_int, c_void, CStr};
@@ -406,16 +407,18 @@ mod tests {
     }
 
     fn register(host: &ServiceHost, reg_id: &CStr, settings: &mut [RVSetting]) -> u32 {
+        register_raw(host, reg_id, settings.as_mut_ptr(), settings.len() as u64)
+    }
+
+    fn register_raw(
+        host: &ServiceHost,
+        reg_id: &CStr,
+        settings: *mut RVSetting,
+        count: u64,
+    ) -> u32 {
         let vtable = settings_vtable(host);
-        // SAFETY: the array outlives the call and every pointer in it is readable.
-        unsafe {
-            (vtable.reg.expect("reg"))(
-                vtable.private_data,
-                reg_id.as_ptr(),
-                settings.as_mut_ptr(),
-                settings.len() as u64,
-            )
-        }
+        // SAFETY: callers provide the pointer/count pair required by the registration ABI.
+        unsafe { (vtable.reg.expect("reg"))(vtable.private_data, reg_id.as_ptr(), settings, count) }
     }
 
     #[test]
@@ -962,6 +965,131 @@ mod tests {
         assert_eq!(settings.reg_ids(), ["empty", "lying"]);
         assert!(settings.schemas("empty").is_empty());
         assert!(settings.schemas("lying").is_empty());
+    }
+
+    #[test]
+    fn settings_counts_at_the_limit_are_accepted() {
+        let empty = RVSetting {
+            int_value: RVSInteger {
+                widget_id: ptr::null(),
+                name: ptr::null(),
+                desc: ptr::null(),
+                widget_type: RVS_INTEGER_TYPE,
+                value: 0,
+                start_range: 0,
+                end_range: 0,
+            },
+        };
+        let mut settings = vec![empty; SETTINGS_COUNT_LIMIT as usize];
+        let host = ServiceHost::default();
+
+        assert_eq!(
+            register(&host, c"limit", &mut settings),
+            RVSettingsResult::Ok as u32
+        );
+        assert!(host.settings().schemas("limit").is_empty());
+    }
+
+    #[test]
+    fn invalid_settings_counts_are_rejected_before_array_access_or_allocation() {
+        let settings = core::ptr::NonNull::<RVSetting>::dangling().as_ptr();
+        let host = ServiceHost::default();
+
+        crate::test_alloc::assert_no_alloc(|| {
+            assert_eq!(
+                register_raw(
+                    &host,
+                    c"over-limit",
+                    settings,
+                    SETTINGS_COUNT_LIMIT.saturating_add(1),
+                ),
+                RVSettingsResult::InvalidCount as u32
+            );
+            assert_eq!(
+                register_raw(&host, c"platform-overflow", settings, u64::MAX),
+                RVSettingsResult::InvalidCount as u32
+            );
+        });
+        assert!(host.settings().reg_ids().is_empty());
+    }
+
+    #[test]
+    fn nested_choice_counts_at_the_limit_are_accepted() {
+        let mut int_choices = vec![
+            RVSIntegerRangeValue {
+                name: ptr::null(),
+                value: 0,
+            };
+            SETTING_CHOICE_COUNT_LIMIT as usize
+        ];
+        let mut str_choices = vec![
+            RVSStringRangeValue {
+                name: ptr::null(),
+                value: ptr::null(),
+            };
+            SETTING_CHOICE_COUNT_LIMIT as usize
+        ];
+        let mut settings = [
+            RVSetting {
+                int_fixed_value: RVSIntegerFixedRange {
+                    widget_id: c"integer-choice".as_ptr(),
+                    name: c"Integer choice".as_ptr(),
+                    desc: c"".as_ptr(),
+                    widget_type: RVS_INTEGER_RANGE_TYPE,
+                    value: 0,
+                    values: int_choices.as_mut_ptr(),
+                    values_size: SETTING_CHOICE_COUNT_LIMIT,
+                },
+            },
+            RVSetting {
+                string_fixed_value: RVSStringFixedRange {
+                    widget_id: c"string-choice".as_ptr(),
+                    name: c"String choice".as_ptr(),
+                    desc: c"".as_ptr(),
+                    widget_type: RVS_STRING_RANGE_TYPE,
+                    value: c"".as_ptr(),
+                    values: str_choices.as_mut_ptr(),
+                    values_size: SETTING_CHOICE_COUNT_LIMIT,
+                },
+            },
+        ];
+        let host = ServiceHost::default();
+
+        assert_eq!(
+            register(&host, c"choice-limits", &mut settings),
+            RVSettingsResult::Ok as u32
+        );
+        let schemas = host.settings().schemas("choice-limits");
+        assert!(matches!(
+            schemas[0].setting,
+            Setting::IntChoice { ref choices, .. } if choices.is_empty()
+        ));
+        assert!(matches!(
+            schemas[1].setting,
+            Setting::StrChoice { ref choices, .. } if choices.is_empty()
+        ));
+    }
+
+    #[test]
+    fn invalid_nested_choice_counts_fail_the_whole_registration() {
+        let mut settings = [RVSetting {
+            int_fixed_value: RVSIntegerFixedRange {
+                widget_id: c"choice".as_ptr(),
+                name: c"Choice".as_ptr(),
+                desc: c"".as_ptr(),
+                widget_type: RVS_INTEGER_RANGE_TYPE,
+                value: 0,
+                values: core::ptr::NonNull::<RVSIntegerRangeValue>::dangling().as_ptr(),
+                values_size: SETTING_CHOICE_COUNT_LIMIT.saturating_add(1),
+            },
+        }];
+        let host = ServiceHost::default();
+
+        assert_eq!(
+            register(&host, c"invalid-choice", &mut settings),
+            RVSettingsResult::InvalidCount as u32
+        );
+        assert!(host.settings().reg_ids().is_empty());
     }
 
     #[test]

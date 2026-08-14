@@ -259,10 +259,13 @@ fn settings(covered: &mut Covered) {
     scalar!(covered, RVS_BOOL_TYPE);
     scalar!(covered, RVS_INTEGER_RANGE_TYPE);
     scalar!(covered, RVS_STRING_RANGE_TYPE);
+    scalar!(covered, RV_SETTINGS_COUNT_LIMIT);
+    scalar!(covered, RVS_CHOICE_COUNT_LIMIT);
     values!(covered, RVSettingsResult,
         Ok = RVSettingsResult_Ok, NotFound = RVSettingsResult_NotFound,
         UnknownId = RVSettingsResult_UnknownId, DuplicatedId = RVSettingsResult_DuplicatedId,
-        WrongType = RVSettingsResult_WrongType);
+        WrongType = RVSettingsResult_WrongType,
+        InvalidCount = RVSettingsResult_InvalidCount);
     layout!(covered, RVSBase, widget_id, name, desc, widget_type);
     layout!(covered, RVSFloat, widget_id, name, desc, widget_type,
         value, start_range, end_range);
