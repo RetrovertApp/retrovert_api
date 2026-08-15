@@ -1,3 +1,5 @@
+//! Generates bindings from the canonical C headers for layout parity tests.
+
 use std::path::PathBuf;
 
 /// Every header of the v2 ABI, in dependency order.

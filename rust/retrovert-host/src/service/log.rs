@@ -14,11 +14,17 @@ pub const LOG_MESSAGE_LIMIT: usize = 2047;
 /// Severity a plugin logged at.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum LogLevel {
+    /// Fine-grained tracing information.
     Trace,
+    /// Debugging information.
     Debug,
+    /// Normal operational information.
     Info,
+    /// A recoverable problem.
     Warn,
+    /// An operation failed.
     Error,
+    /// A failure after which the plugin cannot continue.
     Fatal,
 }
 
@@ -40,6 +46,7 @@ impl LogLevel {
 ///
 /// `file` and `line` are filled only when the plugin used the `rvfl_*` macros.
 pub trait Log: Send + Sync {
+    /// Records one plugin diagnostic.
     fn log(&self, level: LogLevel, file: Option<&str>, line: u32, message: &str);
 }
 

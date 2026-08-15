@@ -101,6 +101,7 @@ impl Default for ServiceHost {
 }
 
 impl ServiceHost {
+    /// Builds a service set from host-provided I/O, logging, and settings storage.
     pub fn new(io: Box<dyn Io>, log: Arc<dyn Log>, store: Box<dyn SettingsStore>) -> Self {
         let settings = SettingsHandle::new(store, Arc::clone(&log));
         let metadata = MetadataHandle::new();

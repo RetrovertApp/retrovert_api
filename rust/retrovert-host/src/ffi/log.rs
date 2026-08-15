@@ -1,4 +1,7 @@
 //! Mirror of `retrovert/log.h`.
+//! Field semantics and ABI contracts are canonical in `include/retrovert/log.h`.
+
+#![allow(missing_docs)]
 
 use core::ffi::{c_char, c_int, c_void};
 

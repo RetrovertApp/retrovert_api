@@ -1,4 +1,7 @@
 //! Mirror of `retrovert/playback.h`.
+//! Field semantics and ABI contracts are canonical in `include/retrovert/playback.h`.
+
+#![allow(missing_docs)]
 
 use core::ffi::{c_char, c_void};
 

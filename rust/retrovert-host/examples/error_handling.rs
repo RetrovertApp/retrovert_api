@@ -1,3 +1,5 @@
+//! Demonstrates downstream matching of the crate's non-exhaustive error enums.
+
 use retrovert_host::loader::LoadError;
 use retrovert_host::service::SettingsError;
 use retrovert_host::session::{AbiViolation, OwnedSessionError, SessionError};

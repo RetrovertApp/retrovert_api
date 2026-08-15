@@ -1,4 +1,7 @@
 //! Mirror of `retrovert/audio_format.h`.
+//! Field semantics and ABI contracts are canonical in `include/retrovert/audio_format.h`.
+
+#![allow(missing_docs)]
 
 abi_enum! {
     /// Sample format of an audio stream.

@@ -8,16 +8,23 @@ use crate::ffi::playback::{
     RVTrackerPosition, RVVizCaps, RVVizInfo,
 };
 
+/// Default number of samples reserved per scope channel.
 pub const DEFAULT_SCOPE_SAMPLE_BUDGET: u32 = 2_048;
+/// Default maximum number of pattern rows captured per frame.
 pub const DEFAULT_PATTERN_ROW_BUDGET: u32 = 64;
+/// Maximum pattern-channel count accepted from a plugin.
 pub const MAX_PATTERN_CHANNELS: u32 = 64;
+/// Maximum scope-channel count accepted from a plugin.
 pub const MAX_SCOPE_CHANNELS: u32 = 64;
+/// Maximum pattern-column count accepted from a plugin.
 pub const MAX_PATTERN_COLUMNS: u32 = 16;
 
 /// Fixed storage limits selected before visualization capture starts.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct VisualizationConfig {
+    /// Maximum samples captured for each scope channel.
     pub scope_sample_budget: u32,
+    /// Maximum pattern rows captured in one snapshot.
     pub pattern_row_budget: u32,
 }
 
@@ -33,10 +40,15 @@ impl Default for VisualizationConfig {
 /// Immutable visualization structure queried once after a song opens.
 #[derive(Debug)]
 pub struct VizLayout {
+    /// Capability bits reported by the plugin.
     pub caps: u32,
+    /// How tracker rows advance across channels.
     pub scroll_mode: RVScrollMode,
+    /// Pattern column descriptors.
     pub columns: Box<[RVColumnDesc]>,
+    /// Pattern channel descriptors.
     pub pattern_channels: Box<[RVChannelDesc]>,
+    /// Scope channel descriptors.
     pub scope_channels: Box<[RVChannelDesc]>,
     config: VisualizationConfig,
     cell_capacity: usize,
@@ -44,6 +56,11 @@ pub struct VizLayout {
 
 impl VizLayout {
     /// Allocates one reusable frame slot. Do this during setup, not in the capture loop.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VisualizationError::DimensionOverflow`] when the configured dimensions
+    /// overflow, or [`VisualizationError::Allocation`] when a snapshot buffer cannot be reserved.
     pub fn new_snapshot(self: &Arc<Self>) -> Result<VizSnapshot, VisualizationError> {
         let channel_rows = if self.scroll_mode == RVScrollMode::PerChannel {
             boxed_buffer(self.pattern_channels.len(), 0, "tracker_channel_rows")?
@@ -92,6 +109,7 @@ impl VizLayout {
         })
     }
 
+    /// Returns the storage limits used to prepare this layout.
     pub const fn config(&self) -> VisualizationConfig {
         self.config
     }
@@ -100,8 +118,11 @@ impl VizLayout {
 /// One reusable, frame-stamped visualization slot.
 #[derive(Debug)]
 pub struct VizSnapshot {
+    /// Output-frame position associated with this snapshot.
     pub output_frame: u64,
+    /// Layout that defines all snapshot arrays.
     pub layout: Arc<VizLayout>,
+    /// Current tracker position, when the plugin reports one.
     pub position: Option<RVTrackerPosition>,
     channel_rows: Box<[u32]>,
     cells: Box<[RVPatternCell]>,
@@ -112,18 +133,22 @@ pub struct VizSnapshot {
 }
 
 impl VizSnapshot {
+    /// Returns per-channel tracker rows for per-channel scrolling layouts.
     pub fn channel_rows(&self) -> &[u32] {
         &self.channel_rows
     }
 
+    /// Returns the populated pattern cells.
     pub fn cells(&self) -> &[RVPatternCell] {
         &self.cells[..self.cell_count]
     }
 
+    /// Returns the populated sample count for each scope channel.
     pub fn scope_counts(&self) -> &[u32] {
         &self.scope_counts
     }
 
+    /// Returns populated scope samples for `channel`, or `None` when it is absent.
     pub fn scope(&self, channel: usize) -> Option<&[f32]> {
         let &count = self.scope_counts.get(channel)?;
         let budget = self.layout.config.scope_sample_budget as usize;
@@ -131,42 +156,62 @@ impl VizSnapshot {
         Some(&self.scope[start..start + count as usize])
     }
 
+    /// Returns VU levels in scope-channel order.
     pub fn vu(&self) -> &[f32] {
         &self.vu
     }
 }
 
+/// Why visualization preparation or capture failed.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum VisualizationError {
+    /// The plugin reported a scroll-mode discriminant unknown to this ABI version.
     #[error("scroll mode {0} is unknown")]
     UnknownScrollMode(u32),
+    /// A callback reported more values than fit in its output buffer.
     #[error("{query} returned {returned} values for a buffer of {capacity}")]
     CountOverrun {
+        /// Callback being validated.
         query: &'static str,
+        /// Value count reported by the callback.
         returned: u32,
+        /// Capacity supplied to the callback.
         capacity: u32,
     },
+    /// A fixed-size callback reported fewer values than requested.
     #[error("{query} returned {returned} values, expected {expected}")]
     CountUnderfill {
+        /// Callback being validated.
         query: &'static str,
+        /// Value count reported by the callback.
         returned: u32,
+        /// Exact value count required.
         expected: u32,
     },
+    /// Derived visualization dimensions overflowed their ABI or host representation.
     #[error("visualization dimensions overflow the ABI count")]
     DimensionOverflow,
+    /// A plugin-reported dimension exceeds the host limit.
     #[error("visualization {dimension} {actual} exceeds the configured limit {limit}")]
     DimensionLimit {
+        /// Name of the rejected dimension.
         dimension: &'static str,
+        /// Value reported by the plugin.
         actual: u32,
+        /// Maximum accepted value.
         limit: u32,
     },
+    /// Visualization was prepared earlier with different storage limits.
     #[error("visualization was already prepared with a different configuration")]
     ConfigurationChanged,
+    /// Capture was requested before visualization preparation.
     #[error("visualization capture was not prepared")]
     NotPrepared,
+    /// The supplied snapshot was allocated for another layout.
     #[error("snapshot belongs to a different visualization layout")]
     LayoutMismatch,
+    /// A named snapshot buffer could not be reserved.
     #[error("could not allocate the {0} snapshot buffer")]
     Allocation(&'static str),
 }

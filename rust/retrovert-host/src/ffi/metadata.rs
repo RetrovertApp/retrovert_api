@@ -1,4 +1,7 @@
 //! Mirror of `retrovert/metadata.h`.
+//! Field semantics and ABI contracts are canonical in `include/retrovert/metadata.h`.
+
+#![allow(missing_docs)]
 
 use core::ffi::{c_char, c_int, c_void, CStr};
 

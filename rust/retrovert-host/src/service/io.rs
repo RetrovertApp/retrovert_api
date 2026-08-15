@@ -17,6 +17,7 @@ pub const IO_URL_LIMIT: usize = 64 * 1024;
 /// archive, a remote address. Buffers are returned owned; the crate hands them across the
 /// ABI and takes them back, so no implementor ever frees plugin memory.
 pub trait Io: Send + Sync {
+    /// Returns whether `url` can be read by this backend.
     fn exists(&self, url: &str) -> bool;
 
     /// `None` when the url cannot be read.

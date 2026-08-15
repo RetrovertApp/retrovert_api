@@ -34,28 +34,38 @@ pub const URL_LIMIT: usize = 64 * 1024;
 /// consumer can still recover what the plugin meant.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct MetadataText {
+    /// Lossy UTF-8 representation of the plugin bytes.
     pub text: String,
+    /// Original bytes when replacement characters were required.
     pub raw: Option<Vec<u8>>,
 }
 
 /// What a tag carries: plugins push text and numbers through separate ABI calls.
 #[derive(Debug, Clone, PartialEq)]
 pub enum MetadataValue {
+    /// A textual tag value.
     Text(MetadataText),
+    /// A finite numeric tag value.
     Number(f64),
 }
 
+/// One key-value tag reported for a track.
 #[derive(Debug, Clone, PartialEq)]
 pub struct MetadataTag {
+    /// Lossy UTF-8 tag key.
     pub key: String,
     /// The key's original bytes, when they were not UTF-8.
     pub raw_key: Option<Vec<u8>>,
+    /// Value associated with the key.
     pub value: MetadataValue,
 }
 
+/// One playable subsong reported by a plugin.
 #[derive(Debug, Clone, PartialEq)]
 pub struct MetadataSubsong {
+    /// Plugin-defined subsong index used when opening it.
     pub index: u32,
+    /// Display name of the subsong.
     pub name: MetadataText,
     /// `None` when the plugin reported no usable length.
     pub length_seconds: Option<f32>,
@@ -65,22 +75,31 @@ pub struct MetadataSubsong {
 /// reported none.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum SubsongCount {
+    /// The plugin reported the subsong list.
     #[default]
     Reported,
+    /// The host synthesized one unnamed subsong.
     Assumed,
 }
 
 /// What the caps cut: one flag per kind of string, one per collection.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct MetadataTruncation {
+    /// The track URL exceeded [`URL_LIMIT`].
     pub url: bool,
+    /// At least one tag key exceeded [`TAG_KEY_LIMIT`].
     pub tag_key: bool,
+    /// At least one tag value exceeded [`TAG_VALUE_LIMIT`].
     pub tag_value: bool,
     /// A subsong, sample or instrument name was cut to [`NAME_LIMIT`].
     pub name: bool,
+    /// More than [`TAG_COUNT_LIMIT`] tags were reported.
     pub tags: bool,
+    /// More than [`SUBSONG_COUNT_LIMIT`] subsongs were reported.
     pub subsongs: bool,
+    /// More than [`NAME_COUNT_LIMIT`] sample names were reported.
     pub samples: bool,
+    /// More than [`NAME_COUNT_LIMIT`] instrument names were reported.
     pub instruments: bool,
 }
 
@@ -91,13 +110,19 @@ pub struct RecordId(pub u64);
 /// Everything the plugins reported about one song.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct TrackMetadata {
+    /// Host-issued identity of this record.
     pub id: RecordId,
     /// The url the plugin named, empty until it calls `create_url`.
     pub url: MetadataText,
+    /// Tags accepted from the plugin.
     pub tags: Vec<MetadataTag>,
+    /// Subsongs accepted from the plugin.
     pub subsongs: Vec<MetadataSubsong>,
+    /// Sample names accepted from the plugin.
     pub samples: Vec<MetadataText>,
+    /// Instrument names accepted from the plugin.
     pub instruments: Vec<MetadataText>,
+    /// Whether the subsong list was reported or synthesized.
     pub subsong_count: SubsongCount,
     /// A string arrived that was not UTF-8; the replacement text carries `raw` beside it.
     pub invalid_utf8: bool,
@@ -109,6 +134,7 @@ pub struct TrackMetadata {
     /// A push named a record this store never minted. It landed here anyway — there is only
     /// ever one — but the plugin is not using the id `create_url` gave it.
     pub foreign_record_id: bool,
+    /// Limits reached while accumulating the record.
     pub truncation: MetadataTruncation,
 }
 

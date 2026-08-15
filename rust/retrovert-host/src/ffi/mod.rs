@@ -6,6 +6,10 @@
 //! does the checked conversion at the point the value is consumed.
 //!
 //! `rv_types.h` contributes no types — it is macros plus standard-header includes.
+//!
+//! Each header mirror carries a scoped `missing_docs` exception tied to its canonical C
+//! declaration. The Rust declarations mirror those headers verbatim and are continuously
+//! checked by the `abi-parity` crate.
 
 /// Declares a `#[repr(u32)]` mirror of a C enum together with its checked conversion.
 macro_rules! abi_enum {

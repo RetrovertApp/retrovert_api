@@ -1,4 +1,7 @@
 //! Mirror of `retrovert/service.h`.
+//! Field semantics and ABI contracts are canonical in `include/retrovert/service.h`.
+
+#![allow(missing_docs)]
 
 use core::ffi::{c_int, c_void};
 

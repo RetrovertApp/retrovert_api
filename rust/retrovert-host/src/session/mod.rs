@@ -55,28 +55,36 @@ type ReadDataFn = unsafe extern "C" fn(*mut c_void, RVReadData) -> RVReadInfo;
 /// Sample rate and channel count of a block of f32 audio.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StreamFormat {
+    /// Samples per second.
     pub sample_rate: u32,
+    /// Interleaved channel count.
     pub channels: u32,
 }
 
 /// The format a plugin committed to with its first chunk and must keep.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FormatLock {
+    /// Native sample representation reported by the plugin.
     pub sample_format: RVAudioStreamFormat,
+    /// Native samples per second.
     pub sample_rate: u32,
+    /// Native interleaved channel count.
     pub channels: u32,
 }
 
 /// One pull's worth of interleaved f32 audio.
 #[derive(Debug)]
 pub struct Chunk<'a> {
+    /// Interleaved samples produced by this pull.
     pub samples: &'a [f32],
+    /// Rate and channel count of `samples`.
     pub format: StreamFormat,
     /// The song ended here; later reads produce nothing.
     pub finished: bool,
 }
 
 impl Chunk<'_> {
+    /// Returns the number of interleaved frames in this chunk.
     pub fn frames(&self) -> usize {
         match self.format.channels as usize {
             0 => 0,
@@ -89,61 +97,113 @@ impl Chunk<'_> {
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum AbiViolation {
+    /// `read_data` returned an unknown status discriminant.
     #[error("status {0} is unknown")]
     UnknownStatus(u32),
+    /// `read_data` returned a status reserved for host requests.
     #[error("status is a request value, not a return value")]
     RequestStatus,
+    /// `read_data` returned an unknown sample-format discriminant.
     #[error("audio format {0} is unknown")]
     UnknownSampleFormat(u32),
+    /// `read_data` returned more frames than requested.
     #[error("frame_count {returned} exceeds the {requested} requested")]
-    FrameCount { returned: u32, requested: u32 },
+    FrameCount {
+        /// Frame count returned by the plugin.
+        returned: u32,
+        /// Frame count requested by the host.
+        requested: u32,
+    },
+    /// The plugin reported neither mono nor stereo audio.
     #[error("channel_count {0} is neither mono nor stereo")]
     ChannelCount(u32),
+    /// The plugin reported a zero sample rate.
     #[error("sample_rate 0 cannot define a timebase")]
     ZeroSampleRate,
+    /// Native and target sample rates exceed the supported conversion ratio.
     #[error("sample-rate ratio between native {native} and target {target} exceeds {max_ratio}:1")]
     SampleRateRatio {
+        /// Native sample rate.
         native: u32,
+        /// Requested target sample rate.
         target: u32,
+        /// Largest supported ratio.
         max_ratio: u32,
     },
+    /// The plugin changed format after the first chunk locked it.
     #[error("format changed from {expected:?} to {found:?}")]
     FormatChanged {
+        /// Format established by the first chunk.
         expected: FormatLock,
+        /// Format reported by the later chunk.
         found: FormatLock,
     },
+    /// Returned samples do not fit in the buffer supplied to the plugin.
     #[error("returned audio needs {needed} bytes, buffer holds {available}")]
-    BufferOverrun { needed: usize, available: usize },
+    BufferOverrun {
+        /// Bytes required for the returned frames.
+        needed: usize,
+        /// Bytes available in the host buffer.
+        available: usize,
+    },
 }
 
 /// Why a session could not start or could not continue.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum SessionError {
+    /// The selected descriptor is not a playback plugin.
     #[error("not a playback plugin")]
     NotPlayback,
+    /// The playback descriptor omits a required callback.
     #[error("plugin has no {0}()")]
     MissingCallback(&'static str),
+    /// The URL contains an interior NUL and cannot cross the C ABI.
     #[error("url contains an interior NUL")]
     InvalidUrl,
+    /// The plugin failed to create a decoder instance.
     #[error("create() returned null")]
     CreateFailed,
+    /// The plugin rejected the song or subsong.
     #[error("open() failed with {0}")]
     OpenFailed(i32),
+    /// The plugin's metadata callback failed.
     #[error("metadata() failed with {0}")]
     MetadataFailed(i32),
+    /// The requested mixer format has an unsupported rate or channel count.
     #[error("target format {} Hz / {} channels is not playable", .0.sample_rate, .0.channels)]
     InvalidTarget(StreamFormat),
+    /// No built-in channel conversion exists for the reported and requested counts.
     #[error("no built-in adaptation from {from} to {to} channels")]
-    ChannelAdaptation { from: u32, to: u32 },
+    ChannelAdaptation {
+        /// Native channel count.
+        from: u32,
+        /// Requested channel count.
+        to: u32,
+    },
+    /// The plugin reported a decode failure.
     #[error("read_data() reported an error")]
     Decode,
+    /// A named session buffer could not be reserved.
     #[error("could not allocate the {0} session buffer")]
     Allocation(&'static str),
+    /// The requested preparation budget exceeds the ABI maximum.
     #[error("frame budget {requested} exceeds the maximum {maximum}")]
-    InvalidFrameBudget { requested: u32, maximum: u32 },
+    InvalidFrameBudget {
+        /// Requested frame budget.
+        requested: u32,
+        /// Largest accepted frame budget.
+        maximum: u32,
+    },
+    /// A read exceeds the budget reserved during preparation.
     #[error("read budget {requested} exceeds the prepared budget {prepared}")]
-    FrameBudgetExceeded { requested: u32, prepared: u32 },
+    FrameBudgetExceeded {
+        /// Requested read size.
+        requested: u32,
+        /// Prepared read limit.
+        prepared: u32,
+    },
+    /// The plugin violated the playback ABI.
     #[error("ABI violation: {0}")]
     Abi(#[from] AbiViolation),
 }
@@ -172,6 +232,11 @@ pub struct Plugin<'a> {
 }
 
 impl<'a> Plugin<'a> {
+    /// Initializes one loaded playback plugin against `host`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SessionError::NotPlayback`] when `loaded` has another plugin kind.
     pub fn new(loaded: &'a mut LoadedPlugin, host: &'a ServiceHost) -> Result<Self, SessionError> {
         let name = loaded.name();
         let plugin = loaded.playback().ok_or(SessionError::NotPlayback)?;
@@ -193,17 +258,29 @@ impl<'a> Plugin<'a> {
         }
     }
 
+    /// Returns the selected plugin's advertised name.
     pub fn name(&self) -> &str {
         self.name
     }
 
     /// Opens a song, leaving conversion to the caller: chunks arrive at the plugin's own
     /// rate and channel count.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SessionError::MissingCallback`] for an incomplete descriptor,
+    /// [`SessionError::InvalidUrl`] for an interior NUL, [`SessionError::CreateFailed`] when
+    /// instance creation fails, or [`SessionError::OpenFailed`] when the plugin rejects the song.
     pub fn open(&self, url: &str, subsong: u32) -> Result<Player<'_>, SessionError> {
         self.open_inner(url, subsong, None)
     }
 
     /// Runs the plugin's static metadata pass. A plugin without one reports no record.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SessionError::InvalidUrl`] for an interior NUL or
+    /// [`SessionError::MetadataFailed`] when the plugin callback fails.
     pub fn metadata(&self, url: &str) -> Result<Option<TrackMetadata>, SessionError> {
         let Some(metadata) = self.plugin.metadata else {
             return Ok(None);
@@ -222,6 +299,15 @@ impl<'a> Plugin<'a> {
     }
 
     /// Opens a song for mixing at `target`: chunks arrive resampled and channel-adapted.
+    /// Rate and channel compatibility are validated on the first prepared read.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SessionError::InvalidTarget`] for a zero rate, zero channels, or too many target
+    /// channels. It returns the descriptor, URL, creation, and open errors documented by
+    /// [`Self::open`]. A later read returns [`SessionError::Abi`] wrapping
+    /// [`AbiViolation::SampleRateRatio`] for an unsupported rate ratio, or
+    /// [`SessionError::ChannelAdaptation`] when no channel conversion exists.
     pub fn open_with_target(
         &self,
         url: &str,
@@ -310,6 +396,11 @@ pub struct PlaybackPlugins<'a> {
 }
 
 impl<'a> PlaybackPlugins<'a> {
+    /// Initializes every loaded playback plugin against `host`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SessionError::NotPlayback`] if a playback entry has no playback descriptor.
     pub fn new(loaded: &'a mut PluginSet, host: &'a ServiceHost) -> Result<Self, SessionError> {
         let plugins = loaded
             .of_kind_mut(PluginKind::Playback)
@@ -362,6 +453,7 @@ struct OwnedPluginEntry {
 }
 
 impl OwnedPlaybackRuntime {
+    /// Takes ownership of loaded plugins and the services they use.
     pub fn new(loaded: PluginSet, host: ServiceHost) -> Self {
         let service = host.service();
         let plugins = loaded
@@ -446,11 +538,17 @@ impl OwnedPlaybackPlugin {
         &self.runtime.inner.plugins[self.index]
     }
 
+    /// Returns the selected plugin's advertised name.
     pub fn name(&self) -> &str {
         &self.entry().name
     }
 
     /// Runs the selected plugin's static metadata pass.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SessionError::InvalidUrl`] for an interior NUL or
+    /// [`SessionError::MetadataFailed`] when the plugin callback fails.
     pub fn metadata(&self, url: &str) -> Result<Option<TrackMetadata>, SessionError> {
         let entry = self.entry();
         let Some(metadata) = entry.plugin.metadata else {
@@ -470,6 +568,17 @@ impl OwnedPlaybackPlugin {
     }
 
     /// Opens and prepares an owned native-format session.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`OwnedSessionError::Session`] wrapping [`SessionError::MissingCallback`],
+    /// [`SessionError::InvalidUrl`], [`SessionError::CreateFailed`],
+    /// [`SessionError::OpenFailed`], [`SessionError::InvalidFrameBudget`], or
+    /// [`SessionError::Allocation`] when session setup fails. Visualization setup returns
+    /// [`OwnedSessionError::Visualization`] wrapping [`VisualizationError::UnknownScrollMode`],
+    /// [`VisualizationError::CountOverrun`], [`VisualizationError::CountUnderfill`],
+    /// [`VisualizationError::DimensionOverflow`], [`VisualizationError::DimensionLimit`], or
+    /// [`VisualizationError::Allocation`].
     pub fn open_prepared(
         &self,
         url: &str,
@@ -481,6 +590,10 @@ impl OwnedPlaybackPlugin {
     }
 
     /// Drops `current` before opening and installing its replacement.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same errors as [`Self::open_prepared`]; `current` remains empty on failure.
     pub fn replace_prepared(
         &self,
         current: &mut Option<OwnedPreparedSession>,
@@ -495,6 +608,13 @@ impl OwnedPlaybackPlugin {
     }
 
     /// Opens and prepares an owned mixer-format session.
+    ///
+    /// # Errors
+    ///
+    /// Returns every error documented by [`Self::open_prepared`], plus
+    /// [`OwnedSessionError::Session`] wrapping [`SessionError::InvalidTarget`] for a zero rate,
+    /// zero channels, or too many target channels. Rate-ratio and channel-conversion failures are
+    /// deferred to [`OwnedPreparedSession::read`].
     pub fn open_prepared_with_target(
         &self,
         url: &str,
@@ -507,6 +627,11 @@ impl OwnedPlaybackPlugin {
     }
 
     /// Drops `current` before opening and installing its mixer-format replacement.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same errors as [`Self::open_prepared_with_target`]; `current` remains empty
+    /// on failure.
     pub fn replace_prepared_with_target(
         &self,
         current: &mut Option<OwnedPreparedSession>,
@@ -569,8 +694,10 @@ impl core::fmt::Debug for OwnedPlaybackPlugin {
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum OwnedSessionError {
+    /// Playback session setup failed.
     #[error(transparent)]
     Session(#[from] SessionError),
+    /// Visualization setup failed.
     #[error(transparent)]
     Visualization(#[from] VisualizationError),
 }
@@ -583,18 +710,42 @@ pub struct OwnedPreparedSession {
 }
 
 impl OwnedPreparedSession {
+    /// Returns the largest frame count accepted by [`Self::read`].
     pub const fn max_frames(&self) -> u32 {
         self.player.max_frames()
     }
 
+    /// Returns the prepared visualization layout, when requested and supported.
     pub fn layout(&self) -> Option<&Arc<VizLayout>> {
         self.layout.as_ref()
     }
 
+    /// Pulls up to `frames` decoded frames without allocating host storage.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SessionError::FrameBudgetExceeded`] above [`Self::max_frames`] or
+    /// [`SessionError::Decode`] when the plugin reports failure. [`SessionError::Abi`] wraps
+    /// [`AbiViolation::UnknownStatus`], [`AbiViolation::RequestStatus`],
+    /// [`AbiViolation::UnknownSampleFormat`], [`AbiViolation::FrameCount`],
+    /// [`AbiViolation::ChannelCount`], [`AbiViolation::ZeroSampleRate`],
+    /// [`AbiViolation::FormatChanged`], or [`AbiViolation::BufferOverrun`] for malformed output.
+    /// [`SessionError::Abi`] wraps [`AbiViolation::SampleRateRatio`] when native and target rates
+    /// exceed the supported ratio. Returns
+    /// [`SessionError::ChannelAdaptation`] when no native-to-target channel conversion exists.
     pub fn read(&mut self, frames: u32) -> Result<Chunk<'_>, SessionError> {
         self.player.read(frames)
     }
 
+    /// Refreshes a preallocated visualization snapshot.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VisualizationError::NotPrepared`] without a layout or
+    /// [`VisualizationError::LayoutMismatch`] for a snapshot from another layout. Plugin output
+    /// outside prepared bounds returns [`VisualizationError::CountOverrun`],
+    /// [`VisualizationError::CountUnderfill`], [`VisualizationError::DimensionOverflow`], or
+    /// [`VisualizationError::DimensionLimit`].
     pub fn capture_visualization(
         &mut self,
         output_frame: u64,
@@ -603,18 +754,22 @@ impl OwnedPreparedSession {
         self.player.capture_visualization(output_frame, snapshot)
     }
 
+    /// Enables or disables scope capture when the plugin supports it.
     pub fn set_scope_enabled(&mut self, enabled: bool) {
         self.player.set_scope_enabled(enabled);
     }
 
+    /// Returns the plugin's native format after its first chunk.
     pub fn native_format(&self) -> Option<FormatLock> {
         self.player.native_format()
     }
 
+    /// Returns the delivered sample rate and channel count.
     pub fn format(&self) -> StreamFormat {
         self.player.format()
     }
 
+    /// Notifies the plugin that settings changed and returns its restart requirement.
     pub fn settings_updated(&mut self) -> RVSettingsUpdate {
         self.player.settings_updated()
     }
@@ -697,11 +852,24 @@ impl DerefMut for PreparedPlayer<'_> {
 }
 
 impl PreparedPlayer<'_> {
+    /// Returns the largest frame count accepted by [`Self::read`].
     pub const fn max_frames(&self) -> u32 {
         self.max_frames
     }
 
     /// Pulls up to `frames` frames without allocating host storage.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SessionError::FrameBudgetExceeded`] above [`Self::max_frames`] or
+    /// [`SessionError::Decode`] when the plugin reports failure. [`SessionError::Abi`] wraps
+    /// [`AbiViolation::UnknownStatus`], [`AbiViolation::RequestStatus`],
+    /// [`AbiViolation::UnknownSampleFormat`], [`AbiViolation::FrameCount`],
+    /// [`AbiViolation::ChannelCount`], [`AbiViolation::ZeroSampleRate`],
+    /// [`AbiViolation::FormatChanged`], or [`AbiViolation::BufferOverrun`] for malformed output.
+    /// [`SessionError::Abi`] wraps [`AbiViolation::SampleRateRatio`] when native and target rates
+    /// exceed the supported ratio. Returns
+    /// [`SessionError::ChannelAdaptation`] when no native-to-target channel conversion exists.
     pub fn read(&mut self, frames: u32) -> Result<Chunk<'_>, SessionError> {
         if frames > self.max_frames {
             return Err(SessionError::FrameBudgetExceeded {
@@ -716,6 +884,11 @@ impl PreparedPlayer<'_> {
 impl<'a> Player<'a> {
     /// Reserves every host buffer needed by reads up to `max_frames` and consumes the
     /// unprepared player so the real-time interface cannot be entered accidentally.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SessionError::InvalidFrameBudget`] above [`MAX_PREPARED_FRAMES`] or
+    /// [`SessionError::Allocation`] when a required buffer cannot be reserved.
     pub fn prepare(mut self, max_frames: u32) -> Result<PreparedPlayer<'a>, SessionError> {
         if max_frames > MAX_PREPARED_FRAMES {
             return Err(SessionError::InvalidFrameBudget {
@@ -735,6 +908,15 @@ impl<'a> Player<'a> {
     /// Repeating this with the same configuration returns the cached layout without
     /// calling the plugin again. Frame slots are allocated explicitly through
     /// [`VizLayout::new_snapshot`] before entering the capture loop.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VisualizationError::ConfigurationChanged`] for a different second configuration
+    /// or [`VisualizationError::UnknownScrollMode`] for an unknown plugin mode. Callback output
+    /// outside supplied bounds returns [`VisualizationError::CountOverrun`],
+    /// [`VisualizationError::CountUnderfill`], [`VisualizationError::DimensionOverflow`], or
+    /// [`VisualizationError::DimensionLimit`]. Returns [`VisualizationError::Allocation`] when
+    /// layout storage cannot be reserved.
     pub fn prepare_visualization(
         &mut self,
         config: VisualizationConfig,
@@ -759,6 +941,14 @@ impl<'a> Player<'a> {
     }
 
     /// Refreshes one preallocated frame slot without allocating.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VisualizationError::NotPrepared`] before setup or
+    /// [`VisualizationError::LayoutMismatch`] for a snapshot from another layout. Plugin output
+    /// outside prepared bounds returns [`VisualizationError::CountOverrun`],
+    /// [`VisualizationError::CountUnderfill`], [`VisualizationError::DimensionOverflow`], or
+    /// [`VisualizationError::DimensionLimit`].
     pub fn capture_visualization(
         &mut self,
         output_frame: u64,

@@ -72,7 +72,9 @@ impl SettingKind {
 /// One entry of a fixed-range setting: a display name for a value.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Choice<T> {
+    /// Label shown to the user.
     pub name: String,
+    /// Value selected by this choice.
     pub value: T,
 }
 
@@ -81,25 +83,39 @@ pub struct Choice<T> {
 pub enum Setting {
     /// `start_range == end_range` means the plugin declared no bounds.
     Float {
+        /// Current value.
         value: f32,
+        /// Inclusive lower bound, or the same as `end_range` when unbounded.
         start_range: f32,
+        /// Inclusive upper bound, or the same as `start_range` when unbounded.
         end_range: f32,
     },
     /// `start_range == end_range` means the plugin declared no bounds.
     Int {
+        /// Current value.
         value: i32,
+        /// Inclusive lower bound, or the same as `end_range` when unbounded.
         start_range: i32,
+        /// Inclusive upper bound, or the same as `start_range` when unbounded.
         end_range: i32,
     },
+    /// A boolean toggle.
     Bool {
+        /// Current value.
         value: bool,
     },
+    /// An integer selected from fixed choices.
     IntChoice {
+        /// Current value.
         value: i32,
+        /// Available values and their labels.
         choices: Vec<Choice<i32>>,
     },
+    /// A string selected from fixed choices.
     StrChoice {
+        /// Current value.
         value: String,
+        /// Available values and their labels.
         choices: Vec<Choice<String>>,
     },
 }
@@ -150,18 +166,26 @@ impl Setting {
 /// A registered setting: its identity and description, plus the value it holds.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SettingSchema {
+    /// Identifier unique within the registration.
     pub id: String,
+    /// Display label.
     pub name: String,
+    /// User-facing description.
     pub desc: String,
+    /// Setting kind and current global value.
     pub setting: Setting,
 }
 
 /// A setting's value, as it crosses the host-facing surface and the persistence store.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Value {
+    /// A floating-point value.
     Float(f32),
+    /// An integer value.
     Int(i32),
+    /// A boolean value.
     Bool(bool),
+    /// A string value.
     Str(String),
 }
 
@@ -270,8 +294,11 @@ impl From<String> for Extension {
 /// One value as persistence sees it. `ext` is empty for the global value.
 #[derive(Debug, Clone, PartialEq)]
 pub struct StoredValue {
+    /// Normalized extension, or empty for the global value.
     pub ext: String,
+    /// Setting identifier within the registration.
     pub id: String,
+    /// Persisted value.
     pub value: Value,
 }
 
@@ -283,7 +310,9 @@ pub struct StoredValue {
 /// [`SettingsUpdate::Default`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettingsUpdate {
+    /// The write changed nothing.
     Default,
+    /// The write changed a value and an open song must be restarted.
     RequireRestart,
 }
 
@@ -296,6 +325,7 @@ pub trait SettingsStore: Send + Sync {
     /// Called while the plugin registers, so its saved values are live from the first read.
     fn load(&self, reg_id: &str) -> Vec<StoredValue>;
 
+    /// Replaces the stored values for `reg_id`.
     fn save(&self, reg_id: &str, values: &[StoredValue]);
 }
 
@@ -319,23 +349,54 @@ impl SettingsStore for MemorySettingsStore {
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
 pub enum SettingsError {
+    /// No settings are registered under `reg_id`.
     #[error("nothing is registered under '{reg_id}'")]
-    NotFound { reg_id: String },
+    NotFound {
+        /// Unknown registration identifier.
+        reg_id: String,
+    },
+    /// The registration has no setting named `id`.
     #[error("'{reg_id}' has no setting '{id}'")]
-    UnknownId { reg_id: String, id: String },
+    UnknownId {
+        /// Registration identifier.
+        reg_id: String,
+        /// Unknown setting identifier.
+        id: String,
+    },
+    /// The supplied value does not match the setting kind.
     #[error("setting '{reg_id}.{id}' is a {actual}, not a {requested}")]
     WrongType {
+        /// Registration identifier.
         reg_id: String,
+        /// Setting identifier.
         id: String,
+        /// Type declared by the schema.
         actual: &'static str,
+        /// Type supplied by the caller.
         requested: &'static str,
     },
+    /// A string value cannot be represented as a C string.
     #[error("setting '{reg_id}.{id}' cannot hold a string with an interior NUL")]
-    InteriorNul { reg_id: String, id: String },
+    InteriorNul {
+        /// Registration identifier.
+        reg_id: String,
+        /// Setting identifier.
+        id: String,
+    },
+    /// The registration identifier is already in use.
     #[error("'{reg_id}' is already registered")]
-    DuplicateRegId { reg_id: String },
+    DuplicateRegId {
+        /// Duplicate registration identifier.
+        reg_id: String,
+    },
+    /// A registration contains the same setting identifier twice.
     #[error("'{reg_id}' registers '{id}' twice")]
-    DuplicateId { reg_id: String, id: String },
+    DuplicateId {
+        /// Registration identifier.
+        reg_id: String,
+        /// Duplicate setting identifier.
+        id: String,
+    },
 }
 
 impl SettingsError {
@@ -697,6 +758,11 @@ impl SettingsHandle {
     }
 
     /// Registers a module's schemas and immediately overlays whatever the store holds for it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SettingsError::DuplicateRegId`] or [`SettingsError::DuplicateId`] for
+    /// duplicate identifiers, or [`SettingsError::InteriorNul`] for an invalid string default.
     pub fn register(&self, reg_id: &str, schemas: Vec<SettingSchema>) -> Result<(), SettingsError> {
         let registration = PendingRegistration {
             registry: Arc::clone(&self.registry),
@@ -757,8 +823,10 @@ impl SettingsHandle {
     ///
     /// # Errors
     ///
-    /// Returns an error when the registration or setting is unknown, the value has the wrong
-    /// type, or a string value contains an interior NUL.
+    /// Returns [`SettingsError::NotFound`] for an unknown registration,
+    /// [`SettingsError::UnknownId`] for an unknown setting, [`SettingsError::WrongType`] when the
+    /// value kind differs from the schema, or [`SettingsError::InteriorNul`] when a string value
+    /// cannot cross the C ABI.
     pub fn set_value(
         &self,
         reg_id: RegistrationId<'_>,
@@ -770,12 +838,22 @@ impl SettingsHandle {
     }
 
     /// Reads through the untyped compatibility API.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SettingsError::NotFound`] or [`SettingsError::UnknownId`] when lookup fails.
     #[deprecated(note = "use SettingsHandle::value with typed identifiers")]
     pub fn get(&self, reg_id: &str, ext: &str, id: &str) -> Result<Value, SettingsError> {
         self.value(reg_id.into(), ext.into(), id.into())
     }
 
     /// Writes through the untyped compatibility API.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SettingsError::NotFound`], [`SettingsError::UnknownId`],
+    /// [`SettingsError::WrongType`], or [`SettingsError::InteriorNul`] under the conditions
+    /// documented by [`Self::set_value`].
     #[deprecated(note = "use SettingsHandle::set_value with typed identifiers")]
     pub fn set(
         &self,

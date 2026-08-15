@@ -35,8 +35,11 @@ const PLUGIN_API_VERSION: u64 = RV_PLAYBACK_PLUGIN_API_VERSION;
 /// The three descriptors a library can publish.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PluginKind {
+    /// A decoder that probes and reads media.
     Playback,
+    /// An audio-output backend.
     Output,
+    /// A sample-rate conversion backend.
     Resample,
 }
 
@@ -76,26 +79,32 @@ pub struct LoadedPlugin {
 }
 
 impl LoadedPlugin {
+    /// Returns the descriptor kind exported by the library.
     pub fn kind(&self) -> PluginKind {
         self.kind
     }
 
+    /// Returns the plugin's advertised name.
     pub fn name(&self) -> &str {
         &self.name
     }
 
+    /// Returns the plugin's advertised version.
     pub fn version(&self) -> &str {
         &self.version
     }
 
+    /// Returns the advertised version of the underlying library.
     pub fn library_version(&self) -> &str {
         &self.library_version
     }
 
+    /// Returns the shared-library path this plugin was loaded from.
     pub fn path(&self) -> &Path {
         &self.path
     }
 
+    /// Returns the playback descriptor when this is a playback plugin.
     pub fn playback(&self) -> Option<&RVPlaybackPlugin> {
         // SAFETY: the descriptor was published by the entry point of the library this
         // struct keeps loaded, `kind` records which type it was published as, and its
@@ -103,11 +112,13 @@ impl LoadedPlugin {
         (self.kind == PluginKind::Playback).then(|| unsafe { self.descriptor.cast().as_ref() })
     }
 
+    /// Returns the output descriptor when this is an output plugin.
     pub fn output(&self) -> Option<&RVOutputPlugin> {
         // SAFETY: as `playback` above.
         (self.kind == PluginKind::Output).then(|| unsafe { self.descriptor.cast().as_ref() })
     }
 
+    /// Returns the resample descriptor when this is a resample plugin.
     pub fn resample(&self) -> Option<&RVResamplePlugin> {
         // SAFETY: as `playback` above.
         (self.kind == PluginKind::Resample).then(|| unsafe { self.descriptor.cast().as_ref() })
@@ -130,38 +141,57 @@ impl fmt::Debug for LoadedPlugin {
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum LoadError {
+    /// The path could not be inspected or enumerated.
     #[error("cannot read path: {0}")]
     Path(#[source] std::io::Error),
+    /// The shared library could not be opened.
     #[error("dlopen failed: {0}")]
     Open(#[source] libloading::Error),
+    /// The library exported no recognized plugin entry point.
     #[error("no plugin entry point")]
     NoEntryPoint,
+    /// An entry point returned a null descriptor.
     #[error("{0} entry point returned a null descriptor")]
     NullDescriptor(PluginKind),
+    /// The descriptor uses an unsupported ABI version.
     #[error("{kind} plugin has api_version {found}, expected {expected}")]
     ApiVersion {
+        /// Kind of descriptor that failed validation.
         kind: PluginKind,
+        /// ABI version found in the descriptor.
         found: u64,
+        /// ABI version required by this crate.
         expected: u64,
     },
+    /// The descriptor did not provide a non-empty name.
     #[error("{0} descriptor has no name")]
     MissingName(PluginKind),
+    /// A descriptor string exceeded its corresponding byte limit.
     #[error("{kind} descriptor {field} exceeds its string limit")]
     DescriptorStringLimit {
+        /// Kind of descriptor that failed validation.
         kind: PluginKind,
+        /// Name of the overlong descriptor field.
         field: &'static str,
     },
     /// Routine rather than exceptional: a CMake `SOVERSION` install leaves
     /// `foo.so`, `foo.1.so` and `foo.1.0.0.so` side by side, all three loadable.
     #[error("{kind} plugin {name:?} is already loaded")]
-    DuplicateName { kind: PluginKind, name: String },
+    DuplicateName {
+        /// Kind shared by both plugins.
+        kind: PluginKind,
+        /// Duplicate plugin name.
+        name: String,
+    },
 }
 
 /// One rejected path. The batch continues past it.
 #[derive(Debug, thiserror::Error)]
 #[error("{}: {source}", path.display())]
 pub struct PluginError {
+    /// Path that was rejected.
     pub path: PathBuf,
+    /// Reason the path was rejected.
     #[source]
     pub source: LoadError,
 }
@@ -174,7 +204,9 @@ pub struct PluginError {
 /// the specialized players.
 #[derive(Debug, Clone)]
 pub struct ProbeOrder {
+    /// Names pinned before unlisted plugins, in priority order.
     pub first: Vec<String>,
+    /// Names pinned after unlisted plugins, in priority order.
     pub last: Vec<String>,
 }
 
@@ -206,16 +238,19 @@ pub struct PluginSet {
 }
 
 impl PluginSet {
+    /// Returns all loaded plugins in probe order.
     pub fn plugins(&self) -> &[LoadedPlugin] {
         &self.plugins
     }
 
+    /// Iterates over plugins of `kind` in probe order.
     pub fn of_kind(&self, kind: PluginKind) -> impl Iterator<Item = &LoadedPlugin> {
         self.plugins
             .iter()
             .filter(move |plugin| plugin.kind == kind)
     }
 
+    /// Mutably iterates over plugins of `kind` in probe order.
     pub fn of_kind_mut(&mut self, kind: PluginKind) -> impl Iterator<Item = &mut LoadedPlugin> {
         self.plugins
             .iter_mut()
@@ -281,7 +316,9 @@ pub(crate) fn select_playback_candidate<'a, T: 'a>(
 /// What one batch produced.
 #[derive(Debug, Default)]
 pub struct LoadReport {
+    /// Plugins that passed loading and descriptor validation.
     pub plugins: PluginSet,
+    /// Paths rejected during the batch.
     pub errors: Vec<PluginError>,
 }
 
