@@ -5,7 +5,11 @@ use core::ptr;
 use std::path::Path;
 
 use crate::ffi::io::RVIoReadUrlResult;
-use crate::service::{context, guard, plugin_str};
+use crate::plugin_string::plugin_str;
+use crate::service::{context, guard};
+
+/// Longest URL or path accepted from an I/O callback, in bytes.
+pub const IO_URL_LIMIT: usize = 64 * 1024;
 
 /// File access a host lends to plugins.
 ///
@@ -35,14 +39,14 @@ impl Io for StdFsIo {
 /// # Safety
 ///
 /// `private_data` must be the context pointer installed by `ServiceHost::new`, and `url`
-/// must be null or a NUL-terminated string readable for its whole length.
+/// must satisfy the bounded string contract for [`IO_URL_LIMIT`].
 pub(super) unsafe extern "C" fn exists(private_data: *mut c_void, url: *const c_char) -> bool {
     guard(false, || {
         // SAFETY: the caller guarantees the context pointer and the string.
-        let (ctx, url) = unsafe { (context(private_data), plugin_str(url)) };
+        let (ctx, url) = unsafe { (context(private_data), plugin_str(url, IO_URL_LIMIT)) };
         match url {
-            Some(url) => ctx.io.exists(&url),
-            None => false,
+            Ok(Some(url)) => ctx.io.exists(&url),
+            Ok(None) | Err(_) => false,
         }
     })
 }
@@ -50,7 +54,7 @@ pub(super) unsafe extern "C" fn exists(private_data: *mut c_void, url: *const c_
 /// # Safety
 ///
 /// `private_data` must be the context pointer installed by `ServiceHost::new`, and `url`
-/// must be null or a NUL-terminated string readable for its whole length.
+/// must satisfy the bounded string contract for [`IO_URL_LIMIT`].
 pub(super) unsafe extern "C" fn read_url_to_memory(
     private_data: *mut c_void,
     url: *const c_char,
@@ -62,8 +66,12 @@ pub(super) unsafe extern "C" fn read_url_to_memory(
 
     guard(empty, || {
         // SAFETY: the caller guarantees the context pointer and the string.
-        let (ctx, url) = unsafe { (context(private_data), plugin_str(url)) };
-        let Some(bytes) = url.and_then(|url| ctx.io.read_to_memory(&url)) else {
+        let (ctx, url) = unsafe { (context(private_data), plugin_str(url, IO_URL_LIMIT)) };
+        let Some(bytes) = url
+            .ok()
+            .flatten()
+            .and_then(|url| ctx.io.read_to_memory(&url))
+        else {
             return empty;
         };
         if bytes.is_empty() {

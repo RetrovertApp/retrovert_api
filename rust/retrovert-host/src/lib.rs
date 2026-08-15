@@ -4,6 +4,7 @@
 mod c_fixture;
 pub mod ffi;
 pub mod loader;
+mod plugin_string;
 pub mod service;
 pub mod session;
 #[cfg(test)]

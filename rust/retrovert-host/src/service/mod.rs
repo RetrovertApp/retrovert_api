@@ -9,8 +9,10 @@ mod log;
 mod metadata;
 mod settings;
 
-pub use io::{Io, StdFsIo};
-pub use log::{retrovert_host_log_write, Log, LogCrate, LogLevel};
+pub use io::{Io, StdFsIo, IO_URL_LIMIT};
+pub use log::{
+    retrovert_host_log_write, Log, LogCrate, LogLevel, LOG_FILE_LIMIT, LOG_MESSAGE_LIMIT,
+};
 pub use metadata::{
     MetadataHandle, MetadataSubsong, MetadataTag, MetadataText, MetadataTruncation, MetadataValue,
     RecordId, SubsongCount, TrackMetadata, NAME_COUNT_LIMIT, NAME_LIMIT, SUBSONG_COUNT_LIMIT,
@@ -19,13 +21,15 @@ pub use metadata::{
 pub use settings::{
     Choice, MemorySettingsStore, Setting, SettingSchema, SettingsError, SettingsHandle,
     SettingsStore, SettingsUpdate, StoredValue, Value, SETTINGS_COUNT_LIMIT,
-    SETTING_CHOICE_COUNT_LIMIT,
+    SETTING_CHOICE_COUNT_LIMIT, SETTING_DESCRIPTION_LIMIT, SETTING_EXTENSION_LIMIT,
+    SETTING_ID_LIMIT, SETTING_LABEL_LIMIT, SETTING_REG_ID_LIMIT, SETTING_VALUE_LIMIT,
 };
 
-use core::ffi::{c_char, c_int, c_void, CStr};
+#[cfg(test)]
+use core::ffi::c_char;
+use core::ffi::{c_int, c_void};
 use core::panic::AssertUnwindSafe;
 use core::ptr;
-use std::borrow::Cow;
 use std::panic::catch_unwind;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
@@ -43,20 +47,6 @@ fn guard<R>(fallback: R, body: impl FnOnce() -> R) -> R {
 /// A poisoned lock still holds the state a plugin pushed; losing it would be worse.
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
-}
-
-/// Decodes a string a plugin passed us. Invalid UTF-8 is replaced rather than rejected.
-///
-/// # Safety
-///
-/// `value` must be null, or a NUL-terminated string readable for its whole length. The
-/// returned borrow must not outlive that string.
-unsafe fn plugin_str<'a>(value: *const c_char) -> Option<Cow<'a, str>> {
-    if value.is_null() {
-        return None;
-    }
-    // SAFETY: the caller guarantees a readable NUL-terminated string when non-null.
-    Some(unsafe { CStr::from_ptr(value) }.to_string_lossy())
 }
 
 /// # Safety
@@ -299,6 +289,22 @@ mod tests {
         }
     }
 
+    struct CapturingIo {
+        urls: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl Io for CapturingIo {
+        fn exists(&self, url: &str) -> bool {
+            self.urls.lock().expect("urls").push(url.to_owned());
+            true
+        }
+
+        fn read_to_memory(&self, url: &str) -> Option<Vec<u8>> {
+            self.urls.lock().expect("urls").push(url.to_owned());
+            Some(vec![1])
+        }
+    }
+
     struct PanickingLog;
 
     impl Log for PanickingLog {
@@ -421,6 +427,10 @@ mod tests {
         unsafe { (vtable.reg.expect("reg"))(vtable.private_data, reg_id.as_ptr(), settings, count) }
     }
 
+    fn repeated(byte: u8, length: usize) -> CString {
+        CString::new(vec![byte; length]).expect("string")
+    }
+
     #[test]
     fn a_host_can_be_built_on_one_thread_and_handed_to_another() {
         fn assert_send<T: Send>() {}
@@ -524,6 +534,48 @@ mod tests {
     }
 
     #[test]
+    fn io_urls_at_the_limit_are_forwarded_and_longer_or_unterminated_ones_are_rejected() {
+        let urls = Arc::new(Mutex::new(Vec::new()));
+        let host = ServiceHost::new(
+            Box::new(CapturingIo {
+                urls: Arc::clone(&urls),
+            }),
+            Arc::new(LogCrate),
+            Box::new(MemorySettingsStore::default()),
+        );
+        let vtable = io_vtable(&host);
+        let at_limit = CString::new(vec![b'x'; IO_URL_LIMIT]).expect("url");
+        let over_limit = CString::new(vec![b'x'; IO_URL_LIMIT + 1]).expect("url");
+        let unterminated = vec![b'x'; IO_URL_LIMIT + 1];
+
+        // SAFETY: each pointer is terminated in or readable through the callback's window.
+        unsafe {
+            assert!((vtable.exists.expect("exists"))(
+                vtable.private_data,
+                at_limit.as_ptr()
+            ));
+            let read =
+                (vtable.read_url_to_memory.expect("read"))(vtable.private_data, at_limit.as_ptr());
+            assert_eq!(read.data_size, 1);
+            (vtable.free_url_to_memory.expect("free"))(vtable.private_data, read.data.cast());
+
+            assert!(!(vtable.exists.expect("exists"))(
+                vtable.private_data,
+                over_limit.as_ptr()
+            ));
+            let rejected = (vtable.read_url_to_memory.expect("read"))(
+                vtable.private_data,
+                unterminated.as_ptr().cast(),
+            );
+            assert!(rejected.data.is_null());
+        }
+
+        let urls = urls.lock().expect("urls");
+        assert_eq!(urls.len(), 2);
+        assert!(urls.iter().all(|url| url.len() == IO_URL_LIMIT));
+    }
+
+    #[test]
     fn the_log_shim_formats_the_plugins_arguments_and_keeps_level_and_location() {
         let captured = Arc::new(CapturingLog::default());
         let host = with_log(captured.clone());
@@ -568,6 +620,94 @@ mod tests {
                 "Trace uade.c:42 ready",
                 "Info from the future",
             ]
+        );
+    }
+
+    #[test]
+    fn log_strings_obey_their_limits_before_reaching_the_host() {
+        let captured = Arc::new(CapturingLog::default());
+        let host = with_log(captured.clone());
+        // SAFETY: the service and returned vtable remain live with `host`.
+        let vtable = unsafe {
+            let service = host.service();
+            &*(service.get_log.expect("get_log"))(service.private_data, RV_LOG_API_VERSION)
+        };
+        let file = CString::new(vec![b'f'; LOG_FILE_LIMIT]).expect("file");
+        let message = CString::new(vec![b'm'; LOG_MESSAGE_LIMIT]).expect("message");
+        let long_file = CString::new(vec![b'f'; LOG_FILE_LIMIT + 1]).expect("file");
+        let long_message = CString::new(vec![b'm'; LOG_MESSAGE_LIMIT + 1]).expect("message");
+        let unterminated_file = vec![b'f'; LOG_FILE_LIMIT + 1];
+        let unterminated_message = vec![b'm'; LOG_MESSAGE_LIMIT + 1];
+
+        // SAFETY: each pointer is terminated in or readable through its documented window.
+        unsafe {
+            retrovert_host_log_write(
+                vtable.private_data,
+                RVLogLevel::Info as u32,
+                file.as_ptr(),
+                1,
+                c"ok".as_ptr(),
+            );
+            retrovert_host_log_write(
+                vtable.private_data,
+                RVLogLevel::Info as u32,
+                ptr::null(),
+                0,
+                message.as_ptr(),
+            );
+            for (file, text) in [
+                (long_file.as_ptr(), c"no".as_ptr()),
+                (ptr::null(), long_message.as_ptr()),
+                (unterminated_file.as_ptr().cast(), c"no".as_ptr()),
+                (ptr::null(), unterminated_message.as_ptr().cast()),
+            ] {
+                retrovert_host_log_write(
+                    vtable.private_data,
+                    RVLogLevel::Info as u32,
+                    file,
+                    0,
+                    text,
+                );
+            }
+        }
+
+        let lines = captured.lines.lock().expect("log lines");
+        assert_eq!(lines.len(), 2);
+        assert!(lines[0].contains(&"f".repeat(LOG_FILE_LIMIT)));
+        assert_eq!(lines[1], format!("Info {}", "m".repeat(LOG_MESSAGE_LIMIT)));
+    }
+
+    #[test]
+    fn log_formats_at_the_limit_succeed_and_longer_or_unterminated_ones_are_dropped() {
+        let captured = Arc::new(CapturingLog::default());
+        let host = with_log(captured.clone());
+        let service = host.service();
+        // SAFETY: the service and returned vtable remain live with `host`.
+        let vtable = unsafe {
+            &*(service.get_log.expect("get_log"))(service.private_data, RV_LOG_API_VERSION)
+        };
+        let at_limit = CString::new(vec![b'x'; LOG_MESSAGE_LIMIT]).expect("format");
+        let over_limit = CString::new(vec![b'x'; LOG_MESSAGE_LIMIT + 1]).expect("format");
+        let unterminated = vec![b'x'; LOG_MESSAGE_LIMIT + 1];
+
+        // SAFETY: each format is terminated in or readable through the shim's window.
+        unsafe {
+            let log = vtable.log.expect("log");
+            log(vtable.private_data, 0, ptr::null(), 0, at_limit.as_ptr());
+            log(vtable.private_data, 0, ptr::null(), 0, over_limit.as_ptr());
+            log(
+                vtable.private_data,
+                0,
+                ptr::null(),
+                0,
+                unterminated.as_ptr().cast(),
+            );
+        }
+
+        let lines = captured.lines.lock().expect("log lines");
+        assert_eq!(
+            lines.as_slice(),
+            [format!("Trace {}", "x".repeat(LOG_MESSAGE_LIMIT))]
         );
     }
 
@@ -1144,6 +1284,233 @@ mod tests {
         let settings = host.settings();
         assert_eq!(settings.reg_ids(), [lossy_reg_id]);
         assert_eq!(settings.schemas(lossy_reg_id)[0].name, "G\u{FFFD}n");
+    }
+
+    #[test]
+    fn settings_registration_fields_accept_their_limits_and_reject_longer_inputs() {
+        let reg_id = repeated(b'r', SETTING_REG_ID_LIMIT);
+        let id = repeated(b'i', SETTING_ID_LIMIT);
+        let name = repeated(b'n', SETTING_LABEL_LIMIT);
+        let desc = repeated(b'd', SETTING_DESCRIPTION_LIMIT);
+        let mut setting = [RVSetting {
+            int_value: RVSInteger {
+                widget_id: id.as_ptr(),
+                name: name.as_ptr(),
+                desc: desc.as_ptr(),
+                widget_type: RVS_INTEGER_TYPE,
+                value: 7,
+                start_range: 0,
+                end_range: 0,
+            },
+        }];
+        let host = ServiceHost::default();
+
+        assert_eq!(
+            register(&host, &reg_id, &mut setting),
+            RVSettingsResult::Ok as u32
+        );
+        let schemas = host.settings().schemas(reg_id.to_str().expect("UTF-8"));
+        assert_eq!(schemas[0].id.len(), SETTING_ID_LIMIT);
+        assert_eq!(schemas[0].name.len(), SETTING_LABEL_LIMIT);
+        assert_eq!(schemas[0].desc.len(), SETTING_DESCRIPTION_LIMIT);
+
+        for field in 0..3 {
+            let id = repeated(b'i', SETTING_ID_LIMIT + usize::from(field == 0));
+            let name = repeated(b'n', SETTING_LABEL_LIMIT + usize::from(field == 1));
+            let desc = repeated(b'd', SETTING_DESCRIPTION_LIMIT + usize::from(field == 2));
+            let mut setting = [RVSetting {
+                int_value: RVSInteger {
+                    widget_id: id.as_ptr(),
+                    name: name.as_ptr(),
+                    desc: desc.as_ptr(),
+                    widget_type: RVS_INTEGER_TYPE,
+                    value: 7,
+                    start_range: 0,
+                    end_range: 0,
+                },
+            }];
+            assert_eq!(
+                register(&ServiceHost::default(), c"reg", &mut setting),
+                RVSettingsResult::NotFound as u32,
+                "field {field}"
+            );
+        }
+
+        let long_unknown_id = repeated(b'i', SETTING_ID_LIMIT + 1);
+        let mut unknown = [RVSetting {
+            int_value: RVSInteger {
+                widget_id: long_unknown_id.as_ptr(),
+                name: c"name".as_ptr(),
+                desc: c"desc".as_ptr(),
+                widget_type: u64::MAX,
+                value: 0,
+                start_range: 0,
+                end_range: 0,
+            },
+        }];
+        assert_eq!(
+            register(&ServiceHost::default(), c"reg", &mut unknown),
+            RVSettingsResult::NotFound as u32
+        );
+
+        let host = ServiceHost::default();
+        let vtable = settings_vtable(&host);
+        let over = repeated(b'r', SETTING_REG_ID_LIMIT + 1);
+        let unterminated = [b'r'; SETTING_REG_ID_LIMIT + 1];
+        // SAFETY: both inputs are readable through the registration-id window.
+        unsafe {
+            assert_eq!(
+                (vtable.reg.expect("reg"))(vtable.private_data, over.as_ptr(), ptr::null_mut(), 0,),
+                RVSettingsResult::NotFound as u32
+            );
+            assert_eq!(
+                (vtable.reg.expect("reg"))(
+                    vtable.private_data,
+                    unterminated.as_ptr().cast(),
+                    ptr::null_mut(),
+                    0,
+                ),
+                RVSettingsResult::NotFound as u32
+            );
+        }
+    }
+
+    #[test]
+    fn setting_choice_strings_obey_label_and_value_limits() {
+        fn result(name_len: usize, value_len: usize, choice_value_len: usize) -> u32 {
+            let name = repeated(b'n', name_len);
+            let value = repeated(b'v', value_len);
+            let choice_value = repeated(b'c', choice_value_len);
+            let mut choices = [RVSStringRangeValue {
+                name: name.as_ptr(),
+                value: choice_value.as_ptr(),
+            }];
+            let mut settings = [RVSetting {
+                string_fixed_value: RVSStringFixedRange {
+                    widget_id: c"choice".as_ptr(),
+                    name: c"Choice".as_ptr(),
+                    desc: c"".as_ptr(),
+                    widget_type: RVS_STRING_RANGE_TYPE,
+                    value: value.as_ptr(),
+                    values: choices.as_mut_ptr(),
+                    values_size: 1,
+                },
+            }];
+            register(&ServiceHost::default(), c"reg", &mut settings)
+        }
+
+        assert_eq!(
+            result(
+                SETTING_LABEL_LIMIT,
+                SETTING_VALUE_LIMIT,
+                SETTING_VALUE_LIMIT
+            ),
+            RVSettingsResult::Ok as u32
+        );
+        for limits in [
+            (
+                SETTING_LABEL_LIMIT + 1,
+                SETTING_VALUE_LIMIT,
+                SETTING_VALUE_LIMIT,
+            ),
+            (
+                SETTING_LABEL_LIMIT,
+                SETTING_VALUE_LIMIT + 1,
+                SETTING_VALUE_LIMIT,
+            ),
+            (
+                SETTING_LABEL_LIMIT,
+                SETTING_VALUE_LIMIT,
+                SETTING_VALUE_LIMIT + 1,
+            ),
+        ] {
+            assert_eq!(
+                result(limits.0, limits.1, limits.2),
+                RVSettingsResult::NotFound as u32
+            );
+        }
+
+        fn int_result(name_len: usize) -> u32 {
+            let name = repeated(b'n', name_len);
+            let mut choices = [RVSIntegerRangeValue {
+                name: name.as_ptr(),
+                value: 1,
+            }];
+            let mut settings = [RVSetting {
+                int_fixed_value: RVSIntegerFixedRange {
+                    widget_id: c"choice".as_ptr(),
+                    name: c"Choice".as_ptr(),
+                    desc: c"".as_ptr(),
+                    widget_type: RVS_INTEGER_RANGE_TYPE,
+                    value: 1,
+                    values: choices.as_mut_ptr(),
+                    values_size: 1,
+                },
+            }];
+            register(&ServiceHost::default(), c"reg", &mut settings)
+        }
+
+        assert_eq!(int_result(SETTING_LABEL_LIMIT), RVSettingsResult::Ok as u32);
+        assert_eq!(
+            int_result(SETTING_LABEL_LIMIT + 1),
+            RVSettingsResult::NotFound as u32
+        );
+    }
+
+    #[test]
+    fn settings_lookup_keys_obey_their_individual_limits() {
+        let host = ServiceHost::default();
+        let mut setting = [RVSetting {
+            int_value: RVSInteger {
+                widget_id: c"id".as_ptr(),
+                name: c"name".as_ptr(),
+                desc: c"".as_ptr(),
+                widget_type: RVS_INTEGER_TYPE,
+                value: 7,
+                start_range: 0,
+                end_range: 0,
+            },
+        }];
+        assert_eq!(
+            register(&host, c"reg", &mut setting),
+            RVSettingsResult::Ok as u32
+        );
+        let vtable = settings_vtable(&host);
+        let ext = repeated(b'e', SETTING_EXTENSION_LIMIT);
+        let long_reg = repeated(b'r', SETTING_REG_ID_LIMIT + 1);
+        let long_ext = repeated(b'e', SETTING_EXTENSION_LIMIT + 1);
+        let long_id = repeated(b'i', SETTING_ID_LIMIT + 1);
+        let unterminated_ext = [b'e'; SETTING_EXTENSION_LIMIT + 1];
+
+        // SAFETY: every pointer is terminated in or readable through its lookup window.
+        unsafe {
+            let get = vtable.get_int.expect("get_int");
+            assert_eq!(
+                get(
+                    vtable.private_data,
+                    c"reg".as_ptr(),
+                    ext.as_ptr(),
+                    c"id".as_ptr()
+                )
+                .result,
+                RVSettingsResult::Ok as u32
+            );
+            for (reg, ext, id) in [
+                (long_reg.as_ptr(), c"".as_ptr(), c"id".as_ptr()),
+                (c"reg".as_ptr(), long_ext.as_ptr(), c"id".as_ptr()),
+                (c"reg".as_ptr(), c"".as_ptr(), long_id.as_ptr()),
+                (
+                    c"reg".as_ptr(),
+                    unterminated_ext.as_ptr().cast(),
+                    c"id".as_ptr(),
+                ),
+            ] {
+                assert_eq!(
+                    get(vtable.private_data, reg, ext, id).result,
+                    RVSettingsResult::NotFound as u32
+                );
+            }
+        }
     }
 
     #[test]

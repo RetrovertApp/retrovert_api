@@ -3,7 +3,13 @@
 use core::ffi::{c_char, c_int, c_void};
 
 use crate::ffi::log::RVLogLevel;
-use crate::service::{context, guard, plugin_str};
+use crate::plugin_string::plugin_str;
+use crate::service::{context, guard};
+
+/// Longest source-file name accepted with a log record, in bytes.
+pub const LOG_FILE_LIMIT: usize = 1024;
+/// Longest formatted log message accepted from the C shim, in bytes.
+pub const LOG_MESSAGE_LIMIT: usize = 2047;
 
 /// Severity a plugin logged at.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -73,7 +79,8 @@ extern "C" {
 /// # Safety
 ///
 /// `private_data` must be the context pointer installed by `ServiceHost::new`. `file` and
-/// `text` must each be null or a NUL-terminated string readable for its whole length.
+/// `text` must satisfy the bounded string contracts for
+/// [`LOG_FILE_LIMIT`] and [`LOG_MESSAGE_LIMIT`].
 #[no_mangle]
 pub unsafe extern "C" fn retrovert_host_log_write(
     private_data: *mut c_void,
@@ -84,9 +91,14 @@ pub unsafe extern "C" fn retrovert_host_log_write(
 ) {
     guard((), || {
         // SAFETY: the caller guarantees the context pointer and both strings.
-        let (ctx, file, text) =
-            unsafe { (context(private_data), plugin_str(file), plugin_str(text)) };
-        let Some(text) = text else {
+        let (ctx, file, text) = unsafe {
+            (
+                context(private_data),
+                plugin_str(file, LOG_FILE_LIMIT),
+                plugin_str(text, LOG_MESSAGE_LIMIT),
+            )
+        };
+        let (Ok(file), Ok(Some(text))) = (file, text) else {
             return;
         };
         ctx.log.log(

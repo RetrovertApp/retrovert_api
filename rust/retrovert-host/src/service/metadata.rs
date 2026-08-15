@@ -12,6 +12,7 @@ use core::ffi::{c_char, c_void};
 use std::sync::{Arc, Mutex};
 
 use crate::ffi::metadata::RVMetadataId;
+use crate::plugin_string::{bounded_bytes as bounded_plugin_bytes, lossy_with_limit, BoundedBytes};
 use crate::service::{context, guard, lock};
 
 /// Longest tag key kept, in bytes.
@@ -201,14 +202,12 @@ struct Decoded {
 ///
 /// `value` must be null, or a NUL-terminated string readable through its terminator.
 unsafe fn bounded_bytes<'a>(value: *const c_char, limit: usize) -> (&'a [u8], bool) {
-    if value.is_null() {
-        return (&[], false);
+    // SAFETY: the caller guarantees the bounded pointer contract.
+    match unsafe { bounded_plugin_bytes(value, limit) } {
+        BoundedBytes::Null => (&[], false),
+        BoundedBytes::Bytes(bytes) => (bytes, false),
+        BoundedBytes::LimitExceeded(prefix) => (prefix, true),
     }
-    // SAFETY: the caller guarantees a terminated string, so the scan stops inside it.
-    let length = unsafe { libc::strnlen(value, limit + 1) };
-    // SAFETY: `strnlen` found that many readable bytes before the terminator.
-    let bytes = unsafe { core::slice::from_raw_parts(value.cast::<u8>(), length.min(limit)) };
-    (bytes, length > limit)
 }
 
 /// Cuts an over-long string on a character boundary rather than mid-codepoint.
@@ -241,7 +240,7 @@ unsafe fn decode(value: *const c_char, limit: usize) -> Decoded {
         },
         Err(_) => Decoded {
             text: MetadataText {
-                text: String::from_utf8_lossy(bytes).into_owned(),
+                text: lossy_with_limit(bytes, limit).into_owned(),
                 raw: Some(bytes.to_vec()),
             },
             truncated,
@@ -902,7 +901,7 @@ mod tests {
         );
         assert_eq!(
             record.samples[0].text,
-            format!("a\u{fffd}{}", "b".repeat(NAME_LIMIT - 2))
+            format!("a\u{fffd}{}", "b".repeat(NAME_LIMIT - 4))
         );
     }
 

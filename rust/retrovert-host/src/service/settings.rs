@@ -17,13 +17,26 @@ use crate::ffi::settings::{
     RVS_CHOICE_COUNT_LIMIT, RVS_FLOAT_TYPE, RVS_INTEGER_RANGE_TYPE, RVS_INTEGER_TYPE,
     RVS_STRING_RANGE_TYPE, RV_SETTINGS_COUNT_LIMIT,
 };
+use crate::plugin_string::plugin_str;
 use crate::service::log::{Log, LogLevel};
-use crate::service::{context, guard, lock, plugin_str};
+use crate::service::{context, guard, lock};
 
 /// Maximum number of settings accepted in one plugin registration.
 pub const SETTINGS_COUNT_LIMIT: u64 = RV_SETTINGS_COUNT_LIMIT;
 /// Maximum number of choices accepted by one fixed-range setting.
 pub const SETTING_CHOICE_COUNT_LIMIT: u64 = RVS_CHOICE_COUNT_LIMIT;
+/// Longest registration identifier accepted from a plugin, in bytes.
+pub const SETTING_REG_ID_LIMIT: usize = 128;
+/// Longest setting identifier accepted from a plugin, in bytes.
+pub const SETTING_ID_LIMIT: usize = 128;
+/// Longest setting or choice display label accepted from a plugin, in bytes.
+pub const SETTING_LABEL_LIMIT: usize = 256;
+/// Longest setting description accepted from a plugin, in bytes.
+pub const SETTING_DESCRIPTION_LIMIT: usize = 4 * 1024;
+/// Longest string setting value accepted from a plugin, in bytes.
+pub const SETTING_VALUE_LIMIT: usize = 4 * 1024;
+/// Longest extension selector accepted from a plugin, in bytes.
+pub const SETTING_EXTENSION_LIMIT: usize = 32;
 
 fn checked_array_count<T>(count: u64, limit: u64) -> Option<usize> {
     if count > limit {
@@ -610,7 +623,9 @@ unsafe fn read_schemas(
         let base = unsafe { entry.cast::<RVSBase>().read() };
         let Some(kind) = SettingKind::from_wire(base.widget_type) else {
             // SAFETY: the caller guarantees a readable id string.
-            let id = unsafe { plugin_str(base.widget_id) }.unwrap_or_default();
+            let id = unsafe { plugin_str(base.widget_id, SETTING_ID_LIMIT) }
+                .map_err(|_| RVSettingsResult::NotFound)?
+                .unwrap_or_default();
             log.log(
                 LogLevel::Warn,
                 None,
@@ -625,10 +640,14 @@ unsafe fn read_schemas(
         // SAFETY: the caller guarantees readable strings.
         let (id, name, desc) = unsafe {
             (
-                plugin_str(base.widget_id),
-                plugin_str(base.name),
-                plugin_str(base.desc),
+                plugin_str(base.widget_id, SETTING_ID_LIMIT),
+                plugin_str(base.name, SETTING_LABEL_LIMIT),
+                plugin_str(base.desc, SETTING_DESCRIPTION_LIMIT),
             )
+        };
+        let (id, name, desc) = match (id, name, desc) {
+            (Ok(id), Ok(name), Ok(desc)) => (id, name, desc),
+            _ => return Err(RVSettingsResult::NotFound),
         };
         let Some(id) = id.filter(|id| !id.is_empty()) else {
             log.log(
@@ -696,7 +715,10 @@ unsafe fn read_schemas(
                 unsafe {
                     let raw = entry.cast::<RVSStringFixedRange>().read();
                     Setting::StrChoice {
-                        value: plugin_str(raw.value).unwrap_or_default().into_owned(),
+                        value: plugin_str(raw.value, SETTING_VALUE_LIMIT)
+                            .map_err(|_| RVSettingsResult::NotFound)?
+                            .unwrap_or_default()
+                            .into_owned(),
                         choices: read_str_choices(raw.values, raw.values_size)?,
                     }
                 }
@@ -727,17 +749,19 @@ unsafe fn read_int_choices(
     }
     // SAFETY: the caller guarantees `count` initialized entries from `values`.
     let entries = unsafe { core::slice::from_raw_parts(values, count) };
-    Ok(entries
-        .iter()
-        .filter_map(|entry| {
-            // SAFETY: the caller guarantees a readable name.
-            let name = unsafe { plugin_str(entry.name) }?;
-            Some(Choice {
+    let mut choices = Vec::with_capacity(count);
+    for entry in entries {
+        // SAFETY: the caller guarantees a bounded readable name.
+        let name = unsafe { plugin_str(entry.name, SETTING_LABEL_LIMIT) }
+            .map_err(|_| RVSettingsResult::NotFound)?;
+        if let Some(name) = name {
+            choices.push(Choice {
                 name: name.into_owned(),
                 value: entry.value,
-            })
-        })
-        .collect())
+            });
+        }
+    }
+    Ok(choices)
 }
 
 /// # Safety
@@ -754,23 +778,33 @@ unsafe fn read_str_choices(
     }
     // SAFETY: the caller guarantees `count` initialized entries from `values`.
     let entries = unsafe { core::slice::from_raw_parts(values, count) };
-    Ok(entries
-        .iter()
-        .filter_map(|entry| {
-            // SAFETY: the caller guarantees readable strings.
-            let (name, value) = unsafe { (plugin_str(entry.name)?, plugin_str(entry.value)?) };
-            Some(Choice {
-                name: name.into_owned(),
-                value: value.into_owned(),
-            })
-        })
-        .collect())
+    let mut choices = Vec::with_capacity(count);
+    for entry in entries {
+        // SAFETY: the caller guarantees bounded readable strings.
+        let (name, value) = unsafe {
+            (
+                plugin_str(entry.name, SETTING_LABEL_LIMIT),
+                plugin_str(entry.value, SETTING_VALUE_LIMIT),
+            )
+        };
+        let (name, value) = match (name, value) {
+            (Ok(Some(name)), Ok(Some(value))) => (name, value),
+            (Ok(None), _) | (_, Ok(None)) => continue,
+            _ => return Err(RVSettingsResult::NotFound),
+        };
+        choices.push(Choice {
+            name: name.into_owned(),
+            value: value.into_owned(),
+        });
+    }
+    Ok(choices)
 }
 
 /// # Safety
 ///
 /// `private_data` must be the context pointer installed by `ServiceHost::new`, `reg_id` must
-/// be null or a readable NUL-terminated string, and `settings` must satisfy [`read_schemas`].
+/// satisfy the bounded contract for [`SETTING_REG_ID_LIMIT`], and `settings` must satisfy
+/// [`read_schemas`].
 pub(super) unsafe extern "C" fn reg(
     private_data: *mut c_void,
     reg_id: *const c_char,
@@ -779,7 +813,15 @@ pub(super) unsafe extern "C" fn reg(
 ) -> u32 {
     guard(RVSettingsResult::NotFound as u32, || {
         // SAFETY: the caller guarantees the context pointer and the string.
-        let (ctx, reg_id) = unsafe { (context(private_data), plugin_str(reg_id)) };
+        let (ctx, reg_id) = unsafe {
+            (
+                context(private_data),
+                plugin_str(reg_id, SETTING_REG_ID_LIMIT),
+            )
+        };
+        let Ok(reg_id) = reg_id else {
+            return RVSettingsResult::NotFound as u32;
+        };
         let Some(reg_id) = reg_id.filter(|reg_id| !reg_id.is_empty()) else {
             return RVSettingsResult::NotFound as u32;
         };
@@ -801,7 +843,7 @@ pub(super) unsafe extern "C" fn reg(
 /// # Safety
 ///
 /// `private_data` must be the context pointer installed by `ServiceHost::new`, and the three
-/// strings must each be null or readable NUL-terminated strings.
+/// strings must satisfy their documented bounded contracts.
 unsafe fn lookup<'a>(
     private_data: *mut c_void,
     reg_id: *const c_char,
@@ -812,10 +854,14 @@ unsafe fn lookup<'a>(
     let (ctx, reg_id, ext, id) = unsafe {
         (
             context(private_data),
-            plugin_str(reg_id),
-            plugin_str(ext),
-            plugin_str(id),
+            plugin_str(reg_id, SETTING_REG_ID_LIMIT),
+            plugin_str(ext, SETTING_EXTENSION_LIMIT),
+            plugin_str(id, SETTING_ID_LIMIT),
         )
+    };
+    let (reg_id, ext, id) = match (reg_id, ext, id) {
+        (Ok(reg_id), Ok(ext), Ok(id)) => (reg_id, ext, id),
+        _ => return Err(RVSettingsResult::NotFound as u32),
     };
     let (Some(reg_id), Some(id)) = (reg_id, id) else {
         return Err(RVSettingsResult::NotFound as u32);

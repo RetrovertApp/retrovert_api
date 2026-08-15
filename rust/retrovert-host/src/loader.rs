@@ -4,7 +4,7 @@
 //! for the extension canon. Acquisition — building, staging, downloading — stays with
 //! the host; this module's world begins at shared libraries on disk.
 
-use core::ffi::{c_char, c_void, CStr};
+use core::ffi::{c_char, c_void};
 use core::fmt;
 use core::mem::offset_of;
 use core::ptr::NonNull;
@@ -17,6 +17,14 @@ use libloading::{Library, Symbol};
 use crate::ffi::output::RVOutputPlugin;
 use crate::ffi::playback::{RVPlaybackPlugin, RVProbeResult, RV_PLAYBACK_PLUGIN_API_VERSION};
 use crate::ffi::resample::RVResamplePlugin;
+use crate::plugin_string::plugin_str;
+
+/// Longest plugin name accepted from a descriptor, in bytes.
+pub const PLUGIN_NAME_LIMIT: usize = 128;
+/// Longest plugin version accepted from a descriptor, in bytes.
+pub const PLUGIN_VERSION_LIMIT: usize = 64;
+/// Longest underlying-library version accepted from a descriptor, in bytes.
+pub const PLUGIN_LIBRARY_VERSION_LIMIT: usize = 256;
 
 /// Accepted on every platform, so a plugin built elsewhere still loads here.
 const PLUGIN_EXTENSIONS: [&str; 4] = ["so", "dylib", "dll", "rvp"];
@@ -137,6 +145,11 @@ pub enum LoadError {
     },
     #[error("{0} descriptor has no name")]
     MissingName(PluginKind),
+    #[error("{kind} descriptor {field} exceeds its string limit")]
+    DescriptorStringLimit {
+        kind: PluginKind,
+        field: &'static str,
+    },
     /// Routine rather than exceptional: a CMake `SOVERSION` install leaves
     /// `foo.so`, `foo.1.so` and `foo.1.0.0.so` side by side, all three loadable.
     #[error("{kind} plugin {name:?} is already loaded")]
@@ -420,11 +433,24 @@ fn load_one(
     // as the library is loaded.
     let (name, version, library_version) = unsafe {
         (
-            descriptor_string(header.name),
-            descriptor_string(header.version),
-            descriptor_string(header.library_version),
+            descriptor_string(header.name, PLUGIN_NAME_LIMIT),
+            descriptor_string(header.version, PLUGIN_VERSION_LIMIT),
+            descriptor_string(header.library_version, PLUGIN_LIBRARY_VERSION_LIMIT),
         )
     };
+
+    let name = name.map_err(|_| LoadError::DescriptorStringLimit {
+        kind,
+        field: "name",
+    })?;
+    let version = version.map_err(|_| LoadError::DescriptorStringLimit {
+        kind,
+        field: "version",
+    })?;
+    let library_version = library_version.map_err(|_| LoadError::DescriptorStringLimit {
+        kind,
+        field: "library_version",
+    })?;
 
     let name = name
         .filter(|name| !name.is_empty())
@@ -480,14 +506,13 @@ fn entry_point(library: &Library) -> Option<(PluginKind, *mut c_void)> {
 
 /// # Safety
 ///
-/// `value` must be null, or a NUL-terminated string readable for its whole length.
-unsafe fn descriptor_string(value: *const c_char) -> Option<String> {
-    if value.is_null() {
-        return None;
-    }
-    // SAFETY: the caller guarantees a readable NUL-terminated string when non-null.
-    let text = unsafe { CStr::from_ptr(value) };
-    Some(text.to_string_lossy().into_owned())
+/// `value` must satisfy [`plugin_str`]'s pointer contract for `limit`.
+unsafe fn descriptor_string(
+    value: *const c_char,
+    limit: usize,
+) -> Result<Option<String>, crate::plugin_string::StringLimitExceeded> {
+    // SAFETY: the caller guarantees the bounded pointer contract.
+    unsafe { plugin_str(value, limit) }.map(|value| value.map(|value| value.into_owned()))
 }
 
 #[cfg(test)]
@@ -636,6 +661,28 @@ static {ty} plugin = {{
     .api_version = {api}, .name = "{name}", .version = "1.0", .library_version = "2.0",
 }};
 {ty}* {entry}(void) {{ return &plugin; }}
+"#
+                ),
+            )
+        }
+
+        fn descriptor_fields(
+            dir: &Path,
+            stem: &str,
+            name: &str,
+            version: &str,
+            library_version: &str,
+        ) -> PathBuf {
+            compile(
+                dir,
+                stem,
+                &format!(
+                    r#"#include <retrovert/playback.h>
+static RVPlaybackPlugin plugin = {{
+    .api_version = 2, .name = "{name}", .version = "{version}",
+    .library_version = "{library_version}",
+}};
+RVPlaybackPlugin* rv_playback_plugin(void) {{ return &plugin; }}
 "#
                 ),
             )
@@ -856,6 +903,55 @@ RVPlaybackPlugin* rv_playback_plugin(void) { return &plugin; }
             ));
             assert!(matches!(report.errors[3].source, LoadError::NoEntryPoint));
             assert_eq!(report.errors.len(), 4);
+        }
+
+        #[test]
+        fn descriptor_strings_accept_their_limits_and_report_each_over_limit_field() {
+            let root = temp_dir();
+            let exact = descriptor_fields(
+                root.path(),
+                "exact",
+                &"n".repeat(PLUGIN_NAME_LIMIT),
+                &"v".repeat(PLUGIN_VERSION_LIMIT),
+                &"l".repeat(PLUGIN_LIBRARY_VERSION_LIMIT),
+            );
+            let report = load_plugins([exact]);
+            assert_eq!(report.plugins.plugins().len(), 1);
+            assert!(report.errors.is_empty());
+
+            for (stem, name, version, library_version, field) in [
+                (
+                    "long_name",
+                    "n".repeat(PLUGIN_NAME_LIMIT + 1),
+                    "v".repeat(PLUGIN_VERSION_LIMIT),
+                    "l".repeat(PLUGIN_LIBRARY_VERSION_LIMIT),
+                    "name",
+                ),
+                (
+                    "long_version",
+                    "n".repeat(PLUGIN_NAME_LIMIT),
+                    "v".repeat(PLUGIN_VERSION_LIMIT + 1),
+                    "l".repeat(PLUGIN_LIBRARY_VERSION_LIMIT),
+                    "version",
+                ),
+                (
+                    "long_library_version",
+                    "n".repeat(PLUGIN_NAME_LIMIT),
+                    "v".repeat(PLUGIN_VERSION_LIMIT),
+                    "l".repeat(PLUGIN_LIBRARY_VERSION_LIMIT + 1),
+                    "library_version",
+                ),
+            ] {
+                let path = descriptor_fields(root.path(), stem, &name, &version, &library_version);
+                let report = load_plugins([path]);
+                assert!(matches!(
+                    report.errors[0].source,
+                    LoadError::DescriptorStringLimit {
+                        kind: PluginKind::Playback,
+                        field: found,
+                    } if found == field
+                ));
+            }
         }
 
         #[test]
