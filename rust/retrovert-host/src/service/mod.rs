@@ -19,10 +19,11 @@ pub use metadata::{
     TAG_COUNT_LIMIT, TAG_KEY_LIMIT, TAG_VALUE_LIMIT, URL_LIMIT,
 };
 pub use settings::{
-    Choice, MemorySettingsStore, Setting, SettingSchema, SettingsError, SettingsHandle,
-    SettingsStore, SettingsUpdate, StoredValue, Value, SETTINGS_COUNT_LIMIT,
-    SETTING_CHOICE_COUNT_LIMIT, SETTING_DESCRIPTION_LIMIT, SETTING_EXTENSION_LIMIT,
-    SETTING_ID_LIMIT, SETTING_LABEL_LIMIT, SETTING_REG_ID_LIMIT, SETTING_VALUE_LIMIT,
+    Choice, Extension, MemorySettingsStore, RegistrationId, Setting, SettingId, SettingSchema,
+    SettingsError, SettingsHandle, SettingsStore, SettingsUpdate, StoredValue, Value,
+    SETTINGS_COUNT_LIMIT, SETTING_CHOICE_COUNT_LIMIT, SETTING_DESCRIPTION_LIMIT,
+    SETTING_EXTENSION_LIMIT, SETTING_ID_LIMIT, SETTING_LABEL_LIMIT, SETTING_REG_ID_LIMIT,
+    SETTING_VALUE_LIMIT,
 };
 
 #[cfg(test)]
@@ -932,7 +933,12 @@ mod tests {
         register(&host, c"libopenmpt", &mut settings);
 
         host.settings()
-            .set("libopenmpt", "mod", "separation", Value::Int(150))
+            .set_value(
+                RegistrationId::new("libopenmpt"),
+                Extension::new("mod"),
+                SettingId::new("separation"),
+                Value::Int(150),
+            )
             .expect("override");
 
         let vtable = settings_vtable(&host);
@@ -1031,7 +1037,12 @@ mod tests {
         assert_eq!(read().value, first.value);
 
         host.settings()
-            .set("libopenmpt", "", "filter", Value::Str("a500".to_string()))
+            .set_value(
+                RegistrationId::new("libopenmpt"),
+                Extension::global(),
+                SettingId::new("filter"),
+                Value::Str("a500".to_string()),
+            )
             .expect("write");
         assert_eq!(text(read()), c"a500");
         assert_eq!(text(first), c"auto");
@@ -1152,7 +1163,12 @@ mod tests {
 
             // A null ext is the same request as an empty one: the global value.
             host.settings()
-                .set("libopenmpt", "mod", "separation", Value::Int(150))
+                .set_value(
+                    RegistrationId::new("libopenmpt"),
+                    Extension::new("mod"),
+                    SettingId::new("separation"),
+                    Value::Int(150),
+                )
                 .expect("override");
             let null_ext = get_int(
                 vtable.private_data,
@@ -1585,7 +1601,12 @@ mod tests {
         let writing = std::thread::spawn(move || {
             for value in 101..=WRITES {
                 writer
-                    .set("libopenmpt", "", "separation", Value::Int(value))
+                    .set_value(
+                        RegistrationId::new("libopenmpt"),
+                        Extension::global(),
+                        SettingId::new("separation"),
+                        Value::Int(value),
+                    )
                     .expect("write");
             }
         });
@@ -1611,7 +1632,11 @@ mod tests {
 
         writing.join().expect("writer thread");
         assert_eq!(
-            host.settings().get("libopenmpt", "", "separation"),
+            host.settings().value(
+                RegistrationId::new("libopenmpt"),
+                Extension::global(),
+                SettingId::new("separation"),
+            ),
             Ok(Value::Int(WRITES))
         );
     }
@@ -1824,10 +1849,20 @@ const char* fixture_filter(void) {
 
             // A host write reaches the plugin, per extension and globally.
             settings
-                .set("fixture", "mod", "separation", Value::Int(150))
+                .set_value(
+                    RegistrationId::new("fixture"),
+                    Extension::new("mod"),
+                    SettingId::new("separation"),
+                    Value::Int(150),
+                )
                 .expect("override");
             settings
-                .set("fixture", "", "filter", Value::Str("a500".to_string()))
+                .set_value(
+                    RegistrationId::new("fixture"),
+                    Extension::global(),
+                    SettingId::new("filter"),
+                    Value::Str("a500".to_string()),
+                )
                 .expect("global");
 
             let separation: Symbol<unsafe extern "C" fn(*const c_char) -> c_int> = library

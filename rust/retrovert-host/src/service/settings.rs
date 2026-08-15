@@ -176,6 +176,97 @@ impl Value {
     }
 }
 
+/// A plugin registration identifier used in settings lookups.
+///
+/// ```compile_fail
+/// use retrovert_host::service::{Extension, RegistrationId, ServiceHost, SettingId};
+///
+/// let settings = ServiceHost::default().settings();
+/// let _ = settings.value(
+///     SettingId::new("filter"),
+///     Extension::global(),
+///     RegistrationId::new("uade"),
+/// );
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct RegistrationId<'a>(&'a str);
+
+impl<'a> RegistrationId<'a> {
+    /// Borrows a registration identifier.
+    pub const fn new(value: &'a str) -> Self {
+        Self(value)
+    }
+
+    /// Returns the borrowed identifier.
+    pub const fn as_str(self) -> &'a str {
+        self.0
+    }
+}
+
+impl<'a> From<&'a str> for RegistrationId<'a> {
+    fn from(value: &'a str) -> Self {
+        Self::new(value)
+    }
+}
+
+/// An identifier for one setting within a plugin registration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct SettingId<'a>(&'a str);
+
+impl<'a> SettingId<'a> {
+    /// Borrows a setting identifier.
+    pub const fn new(value: &'a str) -> Self {
+        Self(value)
+    }
+
+    /// Returns the borrowed identifier.
+    pub const fn as_str(self) -> &'a str {
+        self.0
+    }
+}
+
+impl<'a> From<&'a str> for SettingId<'a> {
+    fn from(value: &'a str) -> Self {
+        Self::new(value)
+    }
+}
+
+/// A normalized file-extension selector for a settings lookup.
+///
+/// Construction removes leading dots and folds case. An empty selector addresses the global
+/// value, and [`Extension::global`] constructs it explicitly.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
+pub struct Extension(String);
+
+impl Extension {
+    /// Normalizes an extension by removing leading dots and folding case.
+    pub fn new(value: impl AsRef<str>) -> Self {
+        Self(value.as_ref().trim_start_matches('.').to_lowercase())
+    }
+
+    /// Selects the global value rather than an extension override.
+    pub const fn global() -> Self {
+        Self(String::new())
+    }
+
+    /// Returns the normalized extension, or an empty string for the global selector.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl From<&str> for Extension {
+    fn from(value: &str) -> Self {
+        Self::new(value)
+    }
+}
+
+impl From<String> for Extension {
+    fn from(value: String) -> Self {
+        Self::new(value)
+    }
+}
+
 /// One value as persistence sees it. `ext` is empty for the global value.
 #[derive(Debug, Clone, PartialEq)]
 pub struct StoredValue {
@@ -258,12 +349,6 @@ impl SettingsError {
             }
         }
     }
-}
-
-/// Extensions are compared without a leading dot and without case, so a setting stored for
-/// `.MOD` answers a lookup for `mod`.
-fn normalize_ext(ext: &str) -> String {
-    ext.trim_start_matches('.').to_lowercase()
 }
 
 /// A string with an interior NUL cannot reach a plugin as a `const char*`, so the registry
@@ -364,14 +449,21 @@ impl Registry {
         self.modules.insert(index, module);
     }
 
-    fn get(&self, reg_id: &str, ext: &str, id: &str) -> Result<Value, SettingsError> {
+    fn value(
+        &self,
+        reg_id: RegistrationId<'_>,
+        ext: &Extension,
+        id: SettingId<'_>,
+    ) -> Result<Value, SettingsError> {
+        let reg_id = reg_id.as_str();
+        let id = id.as_str();
         let module = self.module(reg_id)?;
         let schema = module.schema(id).ok_or_else(|| SettingsError::UnknownId {
             reg_id: reg_id.to_string(),
             id: id.to_string(),
         })?;
 
-        let ext = normalize_ext(ext);
+        let ext = ext.as_str();
         if !ext.is_empty() {
             if let Some(over) = module
                 .overrides
@@ -384,13 +476,15 @@ impl Registry {
         Ok(schema.setting.value())
     }
 
-    fn set(
+    fn set_value(
         &mut self,
-        reg_id: &str,
-        ext: &str,
-        id: &str,
+        reg_id: RegistrationId<'_>,
+        ext: &Extension,
+        id: SettingId<'_>,
         value: Value,
     ) -> Result<SettingsUpdate, SettingsError> {
+        let reg_id = reg_id.as_str();
+        let id = id.as_str();
         let module = self
             .modules
             .iter_mut()
@@ -420,7 +514,7 @@ impl Registry {
 
         // Only an equal value at the same scope is a no-op: pinning an extension to the
         // global value still has to stop a later global write from moving it.
-        let ext = normalize_ext(ext);
+        let ext = ext.as_str();
         let unchanged = if ext.is_empty() {
             global == value
         } else {
@@ -433,7 +527,7 @@ impl Registry {
             return Ok(SettingsUpdate::Default);
         }
 
-        write(module, &ext, id, value);
+        write(module, ext, id, value);
         module.dirty = true;
         module.revision = module
             .revision
@@ -547,12 +641,8 @@ fn restore(log: &dyn Log, module: &mut Module, stored: StoredValue) {
         );
         return;
     }
-    write(
-        module,
-        &normalize_ext(&stored.ext),
-        &stored.id,
-        stored.value,
-    );
+    let ext = Extension::new(&stored.ext);
+    write(module, ext.as_str(), &stored.id, stored.value);
 }
 
 /// Writes a value that the schema has already accepted: into the schema itself when `ext`
@@ -648,12 +738,45 @@ impl SettingsHandle {
             .unwrap_or_default()
     }
 
-    /// Reads the value for `ext`, falling back to the global value. `ext` is empty for global.
-    pub fn get(&self, reg_id: &str, ext: &str, id: &str) -> Result<Value, SettingsError> {
-        lock(&self.registry).get(reg_id, ext, id)
+    /// Reads an extension-specific value, falling back to the global value.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SettingsError::NotFound`] for an unknown registration or
+    /// [`SettingsError::UnknownId`] for an unknown setting.
+    pub fn value(
+        &self,
+        reg_id: RegistrationId<'_>,
+        ext: Extension,
+        id: SettingId<'_>,
+    ) -> Result<Value, SettingsError> {
+        lock(&self.registry).value(reg_id, &ext, id)
     }
 
-    /// Writes the value for `ext`, or the global value when `ext` is empty.
+    /// Writes an extension-specific value, or the global value for [`Extension::global`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the registration or setting is unknown, the value has the wrong
+    /// type, or a string value contains an interior NUL.
+    pub fn set_value(
+        &self,
+        reg_id: RegistrationId<'_>,
+        ext: Extension,
+        id: SettingId<'_>,
+        value: Value,
+    ) -> Result<SettingsUpdate, SettingsError> {
+        lock(&self.registry).set_value(reg_id, &ext, id, value)
+    }
+
+    /// Reads through the untyped compatibility API.
+    #[deprecated(note = "use SettingsHandle::value with typed identifiers")]
+    pub fn get(&self, reg_id: &str, ext: &str, id: &str) -> Result<Value, SettingsError> {
+        self.value(reg_id.into(), ext.into(), id.into())
+    }
+
+    /// Writes through the untyped compatibility API.
+    #[deprecated(note = "use SettingsHandle::set_value with typed identifiers")]
     pub fn set(
         &self,
         reg_id: &str,
@@ -661,7 +784,7 @@ impl SettingsHandle {
         id: &str,
         value: Value,
     ) -> Result<SettingsUpdate, SettingsError> {
-        lock(&self.registry).set(reg_id, ext, id, value)
+        self.set_value(reg_id.into(), ext.into(), id.into(), value)
     }
 
     /// Whether any module has changed since it was last written to the store.
@@ -964,7 +1087,11 @@ unsafe fn lookup<'a>(
     };
     let value = ctx
         .settings
-        .get(&reg_id, ext.as_deref().unwrap_or_default(), &id)
+        .value(
+            RegistrationId::new(&reg_id),
+            Extension::new(ext.as_deref().unwrap_or_default()),
+            SettingId::new(&id),
+        )
         .map_err(|error| error.to_abi() as u32)?;
     Ok((&ctx.settings, value))
 }
@@ -1087,6 +1214,18 @@ pub(super) unsafe extern "C" fn get_bool(
 mod tests {
     use super::*;
 
+    fn reg(value: &str) -> RegistrationId<'_> {
+        RegistrationId::new(value)
+    }
+
+    fn ext(value: &str) -> Extension {
+        Extension::new(value)
+    }
+
+    fn id(value: &str) -> SettingId<'_> {
+        SettingId::new(value)
+    }
+
     #[test]
     fn array_counts_are_bounded_by_service_platform_and_element_limits() {
         assert_eq!(
@@ -1180,7 +1319,12 @@ mod tests {
                     .expect("reentrant registration"),
                 "second" => {
                     settings
-                        .set("base", "", "filter", Value::Int(5))
+                        .set_value(
+                            reg("base"),
+                            Extension::global(),
+                            id("filter"),
+                            Value::Int(5),
+                        )
                         .expect("edit during load");
                 }
                 "panicking" => {
@@ -1200,7 +1344,7 @@ mod tests {
             lock(&self.saves).push((reg_id.to_string(), values.to_vec()));
             let settings = lock(&self.handle).clone().expect("settings handle");
             settings
-                .set("base", "mod", "filter", Value::Int(9))
+                .set_value(reg("base"), ext("mod"), id("filter"), Value::Int(9))
                 .expect("edit during save");
             settings.flush();
         }
@@ -1309,8 +1453,14 @@ mod tests {
             .register("uade", vec![schema("filter", int(1))])
             .expect("registration");
 
-        assert_eq!(settings.get("uade", "", "filter"), Ok(Value::Int(7)));
-        assert_eq!(settings.get("uade", "mod", "filter"), Ok(Value::Int(9)));
+        assert_eq!(
+            settings.value(reg("uade"), Extension::global(), id("filter")),
+            Ok(Value::Int(7))
+        );
+        assert_eq!(
+            settings.value(reg("uade"), ext("mod"), id("filter")),
+            Ok(Value::Int(9))
+        );
     }
 
     #[test]
@@ -1335,7 +1485,10 @@ mod tests {
             .register("uade", vec![schema("filter", int(1))])
             .expect("registration");
 
-        assert_eq!(settings.get("uade", "", "filter"), Ok(Value::Int(1)));
+        assert_eq!(
+            settings.value(reg("uade"), Extension::global(), id("filter")),
+            Ok(Value::Int(1))
+        );
         let lines = lock(&log.lines);
         assert_eq!(lines.len(), 2, "{lines:?}");
         assert!(lines[0].contains("no setting 'gone'"), "{lines:?}");
@@ -1350,12 +1503,21 @@ mod tests {
             .expect("registration");
 
         settings
-            .set("uade", "mod", "filter", Value::Int(5))
+            .set_value(reg("uade"), ext("mod"), id("filter"), Value::Int(5))
             .expect("override");
 
-        assert_eq!(settings.get("uade", "mod", "filter"), Ok(Value::Int(5)));
-        assert_eq!(settings.get("uade", "ahx", "filter"), Ok(Value::Int(1)));
-        assert_eq!(settings.get("uade", "", "filter"), Ok(Value::Int(1)));
+        assert_eq!(
+            settings.value(reg("uade"), ext("mod"), id("filter")),
+            Ok(Value::Int(5))
+        );
+        assert_eq!(
+            settings.value(reg("uade"), ext("ahx"), id("filter")),
+            Ok(Value::Int(1))
+        );
+        assert_eq!(
+            settings.value(reg("uade"), Extension::global(), id("filter")),
+            Ok(Value::Int(1))
+        );
     }
 
     #[test]
@@ -1365,15 +1527,26 @@ mod tests {
             .register("uade", vec![schema("filter", int(1))])
             .expect("registration");
         settings
-            .set("uade", "mod", "filter", Value::Int(5))
+            .set_value(reg("uade"), ext("mod"), id("filter"), Value::Int(5))
             .expect("override");
 
         settings
-            .set("uade", "", "filter", Value::Int(3))
+            .set_value(
+                reg("uade"),
+                Extension::global(),
+                id("filter"),
+                Value::Int(3),
+            )
             .expect("global");
 
-        assert_eq!(settings.get("uade", "mod", "filter"), Ok(Value::Int(5)));
-        assert_eq!(settings.get("uade", "ahx", "filter"), Ok(Value::Int(3)));
+        assert_eq!(
+            settings.value(reg("uade"), ext("mod"), id("filter")),
+            Ok(Value::Int(5))
+        );
+        assert_eq!(
+            settings.value(reg("uade"), ext("ahx"), id("filter")),
+            Ok(Value::Int(3))
+        );
     }
 
     #[test]
@@ -1384,11 +1557,32 @@ mod tests {
             .expect("registration");
 
         settings
-            .set("uade", ".MOD", "filter", Value::Int(5))
+            .set_value(reg("uade"), ext(".MOD"), id("filter"), Value::Int(5))
             .expect("override");
 
+        assert_eq!(
+            settings.value(reg("uade"), ext("mod"), id("filter")),
+            Ok(Value::Int(5))
+        );
+        assert_eq!(
+            settings.value(reg("uade"), ext("Mod"), id("filter")),
+            Ok(Value::Int(5))
+        );
+    }
+
+    #[test]
+    #[allow(deprecated)]
+    fn untyped_accessors_remain_available_during_migration() {
+        let settings = handle();
+        settings
+            .register("uade", vec![schema("filter", int(1))])
+            .expect("registration");
+
+        settings
+            .set("uade", ".MOD", "filter", Value::Int(5))
+            .expect("write");
+
         assert_eq!(settings.get("uade", "mod", "filter"), Ok(Value::Int(5)));
-        assert_eq!(settings.get("uade", "Mod", "filter"), Ok(Value::Int(5)));
     }
 
     #[test]
@@ -1399,20 +1593,25 @@ mod tests {
             .expect("registration");
 
         assert_eq!(
-            settings.get("nope", "", "filter"),
+            settings.value(reg("nope"), Extension::global(), id("filter")),
             Err(SettingsError::NotFound {
                 reg_id: "nope".to_string()
             })
         );
         assert_eq!(
-            settings.get("uade", "", "nope"),
+            settings.value(reg("uade"), Extension::global(), id("nope")),
             Err(SettingsError::UnknownId {
                 reg_id: "uade".to_string(),
                 id: "nope".to_string()
             })
         );
         assert_eq!(
-            settings.set("uade", "", "filter", Value::Bool(true)),
+            settings.set_value(
+                reg("uade"),
+                Extension::global(),
+                id("filter"),
+                Value::Bool(true)
+            ),
             Err(SettingsError::WrongType {
                 reg_id: "uade".to_string(),
                 id: "filter".to_string(),
@@ -1453,17 +1652,33 @@ mod tests {
             )
             .expect("registration");
 
-        assert_eq!(settings.get("openmpt", "", "channels"), Ok(Value::Int(2)));
+        assert_eq!(
+            settings.value(reg("openmpt"), Extension::global(), id("channels")),
+            Ok(Value::Int(2))
+        );
         settings
-            .set("openmpt", "", "channels", Value::Int(4))
-            .expect("write");
-        assert_eq!(settings.get("openmpt", "", "channels"), Ok(Value::Int(4)));
-
-        settings
-            .set("openmpt", "", "filter", Value::Str("a500".to_string()))
+            .set_value(
+                reg("openmpt"),
+                Extension::global(),
+                id("channels"),
+                Value::Int(4),
+            )
             .expect("write");
         assert_eq!(
-            settings.get("openmpt", "", "filter"),
+            settings.value(reg("openmpt"), Extension::global(), id("channels")),
+            Ok(Value::Int(4))
+        );
+
+        settings
+            .set_value(
+                reg("openmpt"),
+                Extension::global(),
+                id("filter"),
+                Value::Str("a500".to_string()),
+            )
+            .expect("write");
+        assert_eq!(
+            settings.value(reg("openmpt"), Extension::global(), id("filter")),
             Ok(Value::Str("a500".to_string()))
         );
     }
@@ -1476,25 +1691,35 @@ mod tests {
             .expect("registration");
 
         assert_eq!(
-            settings.set("uade", "", "filter", Value::Int(1)),
+            settings.set_value(
+                reg("uade"),
+                Extension::global(),
+                id("filter"),
+                Value::Int(1)
+            ),
             Ok(SettingsUpdate::Default)
         );
         assert!(!settings.is_dirty());
 
         assert_eq!(
-            settings.set("uade", "", "filter", Value::Int(2)),
+            settings.set_value(
+                reg("uade"),
+                Extension::global(),
+                id("filter"),
+                Value::Int(2)
+            ),
             Ok(SettingsUpdate::RequireRestart)
         );
         assert!(settings.is_dirty());
 
         settings.flush();
         assert_eq!(
-            settings.set("uade", "mod", "filter", Value::Int(5)),
+            settings.set_value(reg("uade"), ext("mod"), id("filter"), Value::Int(5)),
             Ok(SettingsUpdate::RequireRestart)
         );
         settings.flush();
         assert_eq!(
-            settings.set("uade", "mod", "filter", Value::Int(5)),
+            settings.set_value(reg("uade"), ext("mod"), id("filter"), Value::Int(5)),
             Ok(SettingsUpdate::Default)
         );
         assert!(!settings.is_dirty());
@@ -1512,7 +1737,7 @@ mod tests {
             .expect("registration");
 
         settings
-            .set("uade", "mod", "filter", Value::Int(5))
+            .set_value(reg("uade"), ext("mod"), id("filter"), Value::Int(5))
             .expect("override");
         settings.flush();
         settings.flush();
@@ -1562,12 +1787,18 @@ mod tests {
             .expect("registration");
 
         assert_eq!(settings.reg_ids(), ["base", "child", "second"]);
-        assert_eq!(settings.get("base", "", "filter"), Ok(Value::Int(5)));
+        assert_eq!(
+            settings.value(reg("base"), Extension::global(), id("filter")),
+            Ok(Value::Int(5))
+        );
         assert_eq!(*lock(&log.registrations), vec![vec!["base", "child"]]);
         assert!(settings.is_dirty());
 
         settings.flush();
-        assert_eq!(settings.get("base", "mod", "filter"), Ok(Value::Int(9)));
+        assert_eq!(
+            settings.value(reg("base"), ext("mod"), id("filter")),
+            Ok(Value::Int(9))
+        );
         assert!(settings.is_dirty());
 
         settings.flush();
@@ -1617,7 +1848,12 @@ mod tests {
             )
             .expect("registration");
         settings
-            .set("synth", "", "gain", Value::Float(f32::NAN))
+            .set_value(
+                reg("synth"),
+                Extension::global(),
+                id("gain"),
+                Value::Float(f32::NAN),
+            )
             .expect("write");
 
         settings.flush();
@@ -1633,15 +1869,26 @@ mod tests {
             .expect("registration");
 
         assert_eq!(
-            settings.set("uade", "mod", "filter", Value::Int(1)),
+            settings.set_value(reg("uade"), ext("mod"), id("filter"), Value::Int(1)),
             Ok(SettingsUpdate::RequireRestart)
         );
         settings
-            .set("uade", "", "filter", Value::Int(3))
+            .set_value(
+                reg("uade"),
+                Extension::global(),
+                id("filter"),
+                Value::Int(3),
+            )
             .expect("global");
 
-        assert_eq!(settings.get("uade", "mod", "filter"), Ok(Value::Int(1)));
-        assert_eq!(settings.get("uade", "ahx", "filter"), Ok(Value::Int(3)));
+        assert_eq!(
+            settings.value(reg("uade"), ext("mod"), id("filter")),
+            Ok(Value::Int(1))
+        );
+        assert_eq!(
+            settings.value(reg("uade"), ext("ahx"), id("filter")),
+            Ok(Value::Int(3))
+        );
     }
 
     #[test]
@@ -1661,14 +1908,19 @@ mod tests {
             .expect("registration");
 
         assert_eq!(
-            settings.set("openmpt", "", "filter", Value::Str("a\x00500".to_string())),
+            settings.set_value(
+                reg("openmpt"),
+                Extension::global(),
+                id("filter"),
+                Value::Str("a\x00500".to_string())
+            ),
             Err(SettingsError::InteriorNul {
                 reg_id: "openmpt".to_string(),
                 id: "filter".to_string()
             })
         );
         assert_eq!(
-            settings.get("openmpt", "", "filter"),
+            settings.value(reg("openmpt"), Extension::global(), id("filter")),
             Ok(Value::Str("auto".to_string()))
         );
         assert!(!settings.is_dirty());
@@ -1699,7 +1951,7 @@ mod tests {
             .expect("registration");
 
         assert_eq!(
-            settings.get("openmpt", "", "filter"),
+            settings.value(reg("openmpt"), Extension::global(), id("filter")),
             Ok(Value::Str("auto".to_string()))
         );
         let lines = lock(&log.lines);
@@ -1717,7 +1969,12 @@ mod tests {
             .register("hively", vec![schema("volume", int(64))])
             .expect("registration");
         settings
-            .set("uade", "", "filter", Value::Int(3))
+            .set_value(
+                reg("uade"),
+                Extension::global(),
+                id("filter"),
+                Value::Int(3),
+            )
             .expect("write");
 
         assert_eq!(settings.reg_ids(), ["uade", "hively"]);
