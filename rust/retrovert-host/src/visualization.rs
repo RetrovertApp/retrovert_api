@@ -752,7 +752,7 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_matches_stub_across_threads() {
+    fn miri_unsafe_visualization_snapshot_transfers_between_threads() {
         let plugin = plugin();
         let snapshot = build_for_test(&plugin, 12_345, 64)
             .expect("valid snapshot")

@@ -434,11 +434,19 @@ mod tests {
     }
 
     #[test]
-    fn a_host_can_be_built_on_one_thread_and_handed_to_another() {
+    fn miri_unsafe_service_host_transfers_between_threads() {
         fn assert_send<T: Send>() {}
         assert_send::<ServiceHost>();
         assert_send::<MetadataHandle>();
         assert_send::<SettingsHandle>();
+
+        let host = ServiceHost::default();
+        std::thread::spawn(move || {
+            assert!(host.metadata().take().tags.is_empty());
+            assert!(host.settings().reg_ids().is_empty());
+        })
+        .join()
+        .expect("host thread");
     }
 
     #[test]
@@ -714,7 +722,7 @@ mod tests {
     }
 
     #[test]
-    fn a_plugin_registers_every_widget_kind_and_the_host_sees_the_whole_schema() {
+    fn miri_unsafe_settings_decoder_supports_every_widget_kind() {
         let mut int_choices = [
             RVSIntegerRangeValue {
                 name: c"Mono".as_ptr(),
@@ -844,7 +852,7 @@ mod tests {
     }
 
     #[test]
-    fn mismatched_union_storage_with_an_invalid_boolean_byte_is_skipped() {
+    fn miri_unsafe_settings_decoder_rejects_invalid_boolean_storage() {
         let captured = Arc::new(CapturingLog::default());
         let host = with_log(captured.clone());
         let mut settings = [RVSetting {
@@ -1210,7 +1218,7 @@ mod tests {
     }
 
     #[test]
-    fn settings_counts_at_the_limit_are_accepted() {
+    fn miri_unsafe_settings_decoder_accepts_boundary_counts() {
         let empty = RVSetting {
             int_value: RVSInteger {
                 widget_id: ptr::null(),
@@ -1233,7 +1241,7 @@ mod tests {
     }
 
     #[test]
-    fn invalid_settings_counts_are_rejected_before_array_access_or_allocation() {
+    fn miri_unsafe_settings_decoder_rejects_invalid_counts_before_access() {
         let settings = core::ptr::NonNull::<RVSetting>::dangling().as_ptr();
         let host = ServiceHost::default();
 
@@ -1256,7 +1264,7 @@ mod tests {
     }
 
     #[test]
-    fn nested_choice_counts_at_the_limit_are_accepted() {
+    fn miri_unsafe_settings_decoder_accepts_boundary_choice_counts() {
         let mut int_choices = vec![
             RVSIntegerRangeValue {
                 name: ptr::null(),
@@ -1313,7 +1321,7 @@ mod tests {
     }
 
     #[test]
-    fn invalid_nested_choice_counts_fail_the_whole_registration() {
+    fn miri_unsafe_settings_decoder_rejects_invalid_choice_counts() {
         let mut settings = [RVSetting {
             int_fixed_value: RVSIntegerFixedRange {
                 widget_id: c"choice".as_ptr(),

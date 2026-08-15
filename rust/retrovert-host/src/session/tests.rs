@@ -1430,6 +1430,15 @@ fn preparation_rejects_a_budget_the_abi_cannot_advertise() {
 }
 
 #[test]
+fn miri_unsafe_raw_audio_buffer_views_preserve_storage() {
+    let words = [0.0_f32.to_bits(), 1.5_f32.to_bits(), (-2.25_f32).to_bits()];
+    let expected_bytes: Vec<_> = words.iter().flat_map(|word| word.to_ne_bytes()).collect();
+
+    assert_eq!(raw_bytes(&words), expected_bytes);
+    assert_eq!(raw_f32(&words), [0.0, 1.5, -2.25]);
+}
+
+#[test]
 fn buffer_allocation_failure_is_reported() {
     let mut buffer = Vec::<u32>::new();
     assert_eq!(
