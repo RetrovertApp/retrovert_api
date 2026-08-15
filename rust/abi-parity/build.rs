@@ -38,6 +38,7 @@ fn main() {
         .default_enum_style(bindgen::EnumVariation::Consts)
         // The C enumerators already carry their enum's name.
         .prepend_enum_name(false)
+        .formatter(bindgen::Formatter::Prettyplease)
         .derive_debug(false)
         .layout_tests(false)
         .generate()

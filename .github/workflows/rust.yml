@@ -6,6 +6,20 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
+  msrv:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: rust
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install MSRV
+        uses: dtolnay/rust-toolchain@1.85.0
+
+      - name: Test MSRV
+        run: cargo test --workspace --all-features --locked
+
   rust:
     runs-on: ubuntu-latest
     defaults:

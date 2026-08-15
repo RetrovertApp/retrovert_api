@@ -2,6 +2,7 @@
 name = "abi-parity"
 version = "0.1.0"
 edition = "2021"
+rust-version.workspace = true
 license = "MIT"
 description = "Layout parity gate between retrovert-host's mirror and the C headers"
 publish = false

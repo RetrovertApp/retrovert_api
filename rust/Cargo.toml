@@ -2,6 +2,9 @@
 resolver = "2"
 members = ["retrovert-host", "abi-parity"]
 
+[workspace.package]
+rust-version = "1.85"
+
 [workspace.lints.rust]
 missing_docs = "deny"
 unsafe_op_in_unsafe_fn = "deny"

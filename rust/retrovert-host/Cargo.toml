@@ -2,6 +2,7 @@
 name = "retrovert-host"
 version = "0.1.0"
 edition = "2021"
+rust-version.workspace = true
 license = "MIT"
 description = "Host-side Rust bindings for the Retrovert plugin ABI"
 

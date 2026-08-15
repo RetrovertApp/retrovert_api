@@ -19,6 +19,19 @@ the normal Rust test job.
 cd rust && cargo test
 ```
 
+## Minimum supported Rust version
+
+The Rust workspace supports Rust 1.85 and later. Test the supported feature set with the
+committed dependency resolution by running:
+
+```bash
+cd rust && cargo +1.85.0 test --workspace --all-features --locked
+```
+
+Raising the minimum supported Rust version is a deliberate policy change. It must ship in a
+minor release and update the package metadata, lockfile, CI toolchain, and this documentation
+together.
+
 Playback has an explicit allocation seam before real-time decoding:
 
 ```rust,ignore
