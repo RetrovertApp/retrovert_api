@@ -6,7 +6,7 @@
 
 use core::ffi::{c_char, c_void};
 use core::ptr;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ffi::CString;
 use std::sync::{Arc, Mutex};
 
@@ -276,10 +276,13 @@ fn nul_free(value: &Value) -> bool {
 
 /// One plugin's settings: the schemas it registered, plus per-extension overrides.
 struct Module {
+    registration_order: usize,
     reg_id: String,
     schemas: Vec<SettingSchema>,
     overrides: Vec<StoredValue>,
     dirty: bool,
+    saving: bool,
+    revision: u64,
 }
 
 impl Module {
@@ -302,8 +305,8 @@ impl Module {
 
 struct Registry {
     modules: Vec<Module>,
-    store: Box<dyn SettingsStore>,
-    log: Arc<dyn Log>,
+    pending_registrations: HashSet<String>,
+    next_registration_order: usize,
     /// String values handed to plugins as `const char*`. Append-only and deduplicated, so a
     /// pointer stays valid for as long as the registry and repeated reads do not grow it.
     interned: Vec<CString>,
@@ -319,8 +322,14 @@ impl Registry {
             })
     }
 
-    fn register(&mut self, reg_id: &str, schemas: Vec<SettingSchema>) -> Result<(), SettingsError> {
-        if self.modules.iter().any(|module| module.reg_id == reg_id) {
+    fn begin_registration(
+        &mut self,
+        reg_id: &str,
+        schemas: &[SettingSchema],
+    ) -> Result<usize, SettingsError> {
+        if self.modules.iter().any(|module| module.reg_id == reg_id)
+            || self.pending_registrations.contains(reg_id)
+        {
             return Err(SettingsError::DuplicateRegId {
                 reg_id: reg_id.to_string(),
             });
@@ -334,67 +343,18 @@ impl Registry {
             }
         }
 
-        let mut module = Module {
-            reg_id: reg_id.to_string(),
-            schemas,
-            overrides: Vec::new(),
-            dirty: false,
-        };
-        for stored in self.store.load(reg_id) {
-            self.restore(&mut module, stored);
-        }
-        self.modules.push(module);
-        Ok(())
+        let order = self.next_registration_order;
+        self.next_registration_order = order.checked_add(1).expect("registration order exhausted");
+        self.pending_registrations.insert(reg_id.to_string());
+        Ok(order)
     }
 
-    /// Applies one persisted value over a freshly registered schema. A value the schema no
-    /// longer matches is reported and dropped — settings outlive the plugins that wrote them.
-    fn restore(&self, module: &mut Module, stored: StoredValue) {
-        let Some(schema) = module.schema(&stored.id) else {
-            self.log.log(
-                LogLevel::Warn,
-                None,
-                0,
-                &format!(
-                    "'{}' has no setting '{}'; stored value dropped",
-                    module.reg_id, stored.id
-                ),
-            );
-            return;
-        };
-        if !schema.setting.accepts(&stored.value) {
-            self.log.log(
-                LogLevel::Warn,
-                None,
-                0,
-                &format!(
-                    "'{}.{}' is a {}, not a {}; stored value dropped",
-                    module.reg_id,
-                    stored.id,
-                    schema.setting.type_name(),
-                    stored.value.type_name()
-                ),
-            );
-            return;
-        }
-        if !nul_free(&stored.value) {
-            self.log.log(
-                LogLevel::Warn,
-                None,
-                0,
-                &format!(
-                    "'{}.{}' holds a string with an interior NUL; stored value dropped",
-                    module.reg_id, stored.id
-                ),
-            );
-            return;
-        }
-        write(
-            module,
-            &normalize_ext(&stored.ext),
-            &stored.id,
-            stored.value,
-        );
+    fn finish_registration(&mut self, module: Module) {
+        self.pending_registrations.remove(&module.reg_id);
+        let index = self.modules.partition_point(|registered| {
+            registered.registration_order < module.registration_order
+        });
+        self.modules.insert(index, module);
     }
 
     fn get(&self, reg_id: &str, ext: &str, id: &str) -> Result<Value, SettingsError> {
@@ -468,15 +428,36 @@ impl Registry {
 
         write(module, &ext, id, value);
         module.dirty = true;
+        module.revision = module
+            .revision
+            .checked_add(1)
+            .expect("settings revision exhausted");
         Ok(SettingsUpdate::RequireRestart)
     }
 
-    fn flush(&mut self) {
-        let Self { modules, store, .. } = self;
-        for module in modules.iter_mut().filter(|module| module.dirty) {
-            store.save(&module.reg_id, &module.stored_values());
-            module.dirty = false;
-        }
+    fn begin_flush(&mut self) -> Vec<(String, Vec<StoredValue>, u64)> {
+        self.modules
+            .iter_mut()
+            .filter(|module| module.dirty && !module.saving)
+            .map(|module| {
+                module.saving = true;
+                (
+                    module.reg_id.clone(),
+                    module.stored_values(),
+                    module.revision,
+                )
+            })
+            .collect()
+    }
+
+    fn finish_save(&mut self, reg_id: &str, revision: u64, succeeded: bool) {
+        let module = self
+            .modules
+            .iter_mut()
+            .find(|module| module.reg_id == reg_id)
+            .expect("only registered modules are saved");
+        module.saving = false;
+        module.dirty = !succeeded || module.revision != revision;
     }
 
     /// Returns a `const char*` that outlives the call, reusing an equal string if one was
@@ -493,6 +474,78 @@ impl Registry {
             });
         self.interned[index].as_ptr()
     }
+}
+
+struct PendingRegistration {
+    registry: Arc<Mutex<Registry>>,
+    reg_id: String,
+    order: usize,
+    active: bool,
+}
+
+impl PendingRegistration {
+    fn finish(mut self, module: Module) {
+        lock(&self.registry).finish_registration(module);
+        self.active = false;
+    }
+}
+
+impl Drop for PendingRegistration {
+    fn drop(&mut self) {
+        if self.active {
+            lock(&self.registry)
+                .pending_registrations
+                .remove(&self.reg_id);
+        }
+    }
+}
+
+fn restore(log: &dyn Log, module: &mut Module, stored: StoredValue) {
+    let Some(schema) = module.schema(&stored.id) else {
+        log.log(
+            LogLevel::Warn,
+            None,
+            0,
+            &format!(
+                "'{}' has no setting '{}'; stored value dropped",
+                module.reg_id, stored.id
+            ),
+        );
+        return;
+    };
+    if !schema.setting.accepts(&stored.value) {
+        log.log(
+            LogLevel::Warn,
+            None,
+            0,
+            &format!(
+                "'{}.{}' is a {}, not a {}; stored value dropped",
+                module.reg_id,
+                stored.id,
+                schema.setting.type_name(),
+                stored.value.type_name()
+            ),
+        );
+        return;
+    }
+    if !nul_free(&stored.value) {
+        log.log(
+            LogLevel::Warn,
+            None,
+            0,
+            &format!(
+                "'{}.{}' holds a string with an interior NUL; stored value dropped",
+                module.reg_id, stored.id
+            ),
+        );
+        return;
+    }
+    write(
+        module,
+        &normalize_ext(&stored.ext),
+        &stored.id,
+        stored.value,
+    );
 }
 
 /// Writes a value that the schema has already accepted: into the schema itself when `ext`
@@ -528,6 +581,8 @@ fn write(module: &mut Module, ext: &str, id: &str, value: Value) {
 #[derive(Clone)]
 pub struct SettingsHandle {
     registry: Arc<Mutex<Registry>>,
+    store: Arc<dyn SettingsStore>,
+    log: Arc<dyn Log>,
 }
 
 impl SettingsHandle {
@@ -535,16 +590,37 @@ impl SettingsHandle {
         Self {
             registry: Arc::new(Mutex::new(Registry {
                 modules: Vec::new(),
-                store,
-                log,
+                pending_registrations: HashSet::new(),
+                next_registration_order: 0,
                 interned: Vec::new(),
             })),
+            store: Arc::from(store),
+            log,
         }
     }
 
     /// Registers a module's schemas and immediately overlays whatever the store holds for it.
     pub fn register(&self, reg_id: &str, schemas: Vec<SettingSchema>) -> Result<(), SettingsError> {
-        lock(&self.registry).register(reg_id, schemas)
+        let registration = PendingRegistration {
+            registry: Arc::clone(&self.registry),
+            reg_id: reg_id.to_string(),
+            order: lock(&self.registry).begin_registration(reg_id, &schemas)?,
+            active: true,
+        };
+        let mut module = Module {
+            registration_order: registration.order,
+            reg_id: reg_id.to_string(),
+            schemas,
+            overrides: Vec::new(),
+            dirty: false,
+            saving: false,
+            revision: 0,
+        };
+        for stored in self.store.load(reg_id) {
+            restore(&*self.log, &mut module, stored);
+        }
+        registration.finish(module);
+        Ok(())
     }
 
     /// Registered modules, in registration order.
@@ -591,7 +667,20 @@ impl SettingsHandle {
 
     /// Writes every changed module to the store. Hosts choose when; the crate never does it.
     pub fn flush(&self) {
-        lock(&self.registry).flush()
+        let saves = lock(&self.registry).begin_flush();
+        for (index, (reg_id, values, revision)) in saves.iter().enumerate() {
+            let saved = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                self.store.save(reg_id, values);
+            }));
+            lock(&self.registry).finish_save(reg_id, *revision, saved.is_ok());
+            if let Err(payload) = saved {
+                let mut registry = lock(&self.registry);
+                for (reg_id, _, revision) in &saves[index + 1..] {
+                    registry.finish_save(reg_id, *revision, false);
+                }
+                std::panic::resume_unwind(payload);
+            }
+        }
     }
 }
 
@@ -1068,6 +1157,61 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
+    struct ReentrantStore {
+        handle: Mutex<Option<SettingsHandle>>,
+        loads: Mutex<HashMap<String, Vec<StoredValue>>>,
+        saves: Mutex<Vec<(String, Vec<StoredValue>)>>,
+    }
+
+    impl SettingsStore for Arc<ReentrantStore> {
+        fn load(&self, reg_id: &str) -> Vec<StoredValue> {
+            let settings = lock(&self.handle).clone().expect("settings handle");
+            match reg_id {
+                "base" => settings
+                    .register("child", vec![schema("volume", int(64))])
+                    .expect("reentrant registration"),
+                "second" => {
+                    settings
+                        .set("base", "", "filter", Value::Int(5))
+                        .expect("edit during load");
+                }
+                "panicking" => {
+                    settings
+                        .register("during-panic", vec![schema("volume", int(64))])
+                        .expect("reentrant registration");
+                    panic!("load failed");
+                }
+                _ => {
+                    settings.reg_ids();
+                }
+            }
+            lock(&self.loads).get(reg_id).cloned().unwrap_or_default()
+        }
+
+        fn save(&self, reg_id: &str, values: &[StoredValue]) {
+            lock(&self.saves).push((reg_id.to_string(), values.to_vec()));
+            let settings = lock(&self.handle).clone().expect("settings handle");
+            settings
+                .set("base", "mod", "filter", Value::Int(9))
+                .expect("edit during save");
+            settings.flush();
+        }
+    }
+
+    #[derive(Default)]
+    struct ReentrantLog {
+        handle: Mutex<Option<SettingsHandle>>,
+        registrations: Mutex<Vec<Vec<String>>>,
+    }
+
+    impl Log for ReentrantLog {
+        fn log(&self, _level: LogLevel, _file: Option<&str>, _line: u32, _message: &str) {
+            let settings = lock(&self.handle).clone().expect("settings handle");
+            lock(&self.registrations).push(settings.reg_ids());
+        }
+    }
+
     fn schema(id: &str, setting: Setting) -> SettingSchema {
         SettingSchema {
             id: id.to_string(),
@@ -1384,6 +1528,93 @@ mod tests {
                 },
             ]
         );
+        assert!(!settings.is_dirty());
+    }
+
+    #[test]
+    fn adapters_reenter_and_edits_during_load_or_flush_stay_dirty() {
+        let store = Arc::new(ReentrantStore::default());
+        lock(&store.loads).insert(
+            "second".to_string(),
+            vec![StoredValue {
+                ext: String::new(),
+                id: "gone".to_string(),
+                value: Value::Int(7),
+            }],
+        );
+        let log = Arc::new(ReentrantLog::default());
+        let settings = SettingsHandle::new(Box::new(Arc::clone(&store)), log.clone());
+        *lock(&store.handle) = Some(settings.clone());
+        *lock(&log.handle) = Some(settings.clone());
+
+        settings
+            .register("base", vec![schema("filter", int(1))])
+            .expect("registration");
+        settings
+            .register("second", vec![schema("filter", int(2))])
+            .expect("registration");
+
+        assert_eq!(settings.reg_ids(), ["base", "child", "second"]);
+        assert_eq!(settings.get("base", "", "filter"), Ok(Value::Int(5)));
+        assert_eq!(*lock(&log.registrations), vec![vec!["base", "child"]]);
+        assert!(settings.is_dirty());
+
+        settings.flush();
+        assert_eq!(settings.get("base", "mod", "filter"), Ok(Value::Int(9)));
+        assert!(settings.is_dirty());
+
+        settings.flush();
+        let saves = lock(&store.saves);
+        assert_eq!(saves.len(), 2, "{saves:?}");
+        assert_eq!(saves[0].1.len(), 1);
+        assert_eq!(saves[1].1.len(), 2);
+        assert!(!settings.is_dirty());
+    }
+
+    #[test]
+    fn an_aborted_registration_does_not_reuse_a_completed_order() {
+        let store = Arc::new(ReentrantStore::default());
+        let settings = SettingsHandle::new(
+            Box::new(Arc::clone(&store)),
+            Arc::new(CapturingLog::default()),
+        );
+        *lock(&store.handle) = Some(settings.clone());
+
+        let failed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            settings
+                .register("panicking", vec![schema("filter", int(1))])
+                .expect("registration");
+        }));
+        assert!(failed.is_err());
+        settings
+            .register("after-panic", vec![schema("filter", int(2))])
+            .expect("registration");
+
+        assert_eq!(settings.reg_ids(), ["during-panic", "after-panic"]);
+    }
+
+    #[test]
+    fn a_saved_nan_value_becomes_clean() {
+        let settings = handle();
+        settings
+            .register(
+                "synth",
+                vec![schema(
+                    "gain",
+                    Setting::Float {
+                        value: 0.0,
+                        start_range: 0.0,
+                        end_range: 0.0,
+                    },
+                )],
+            )
+            .expect("registration");
+        settings
+            .set("synth", "", "gain", Value::Float(f32::NAN))
+            .expect("write");
+
+        settings.flush();
+
         assert!(!settings.is_dirty());
     }
 
