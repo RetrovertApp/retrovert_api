@@ -670,14 +670,6 @@ mod tests {
         }
     }
 
-    /// The fixtures below are built by invoking `cc`. Everything past scanning —
-    /// loading, validation, ordering, selection — goes unverified without them.
-    #[cfg(not(unix))]
-    #[test]
-    #[ignore = "plugin fixtures are built only on unix; load, validate, order and select are unverified here"]
-    fn fixture_backed_coverage_is_unavailable() {}
-
-    #[cfg(unix)]
     mod fixtures {
         use super::*;
 
@@ -782,6 +774,45 @@ RVPlaybackPlugin* rv_playback_plugin(void) { return 0; }
             compile(dir, "no_entry", "int unrelated(void) { return 0; }\n")
         }
 
+        fn unload_notifier(dir: &Path, event_path: &Path) -> PathBuf {
+            let event_path = event_path
+                .display()
+                .to_string()
+                .replace('\\', "\\\\")
+                .replace('"', "\\\"");
+            compile(
+                dir,
+                "unload_notifier",
+                &format!(
+                    r#"#include <stdio.h>
+#include <retrovert/playback.h>
+
+#ifndef _WIN32
+static void note_unload(void) {{
+    FILE* file = fopen("{event_path}", "w");
+    if (file != NULL) {{ fputs("unloaded", file); fclose(file); }}
+}}
+#endif
+
+static RVProbeResult probe(uint8_t* data, uint64_t size, const char* name, uint64_t total) {{
+    (void)data; (void)size; (void)total;
+    return name[0] == 'w' ? RVProbeResult_Supported : RVProbeResult_Unsupported;
+}}
+
+static RVPlaybackPlugin plugin = {{
+    .api_version = 2, .name = "windows", .version = "1.0", .library_version = "2.0",
+    .probe_can_play = probe,
+}};
+RVPlaybackPlugin* rv_playback_plugin(void) {{ return &plugin; }}
+
+#ifndef _WIN32
+__attribute__((destructor)) static void library_unload(void) {{ note_unload(); }}
+#endif
+"#
+                ),
+            )
+        }
+
         /// A descriptor a lazy bind would accept, in a library calling a symbol that
         /// nothing defines.
         #[cfg(target_os = "linux")]
@@ -859,7 +890,37 @@ RVPlaybackPlugin* rv_playback_plugin(void) { return &plugin; }
             assert!(plugins[2].output().is_some());
             assert_eq!(plugins[1].version(), "1.0");
             assert_eq!(plugins[1].library_version(), "2.0");
-            assert_eq!(plugins[1].path().file_name().unwrap(), "player.so");
+            assert_eq!(
+                plugins[1]
+                    .path()
+                    .extension()
+                    .and_then(|value| value.to_str()),
+                Some(std::env::consts::DLL_EXTENSION)
+            );
+        }
+
+        #[test]
+        fn a_native_library_loads_selects_and_unloads() {
+            let root = temp_dir();
+            let event_path = root.path().join("unload-event");
+            let fixture = unload_notifier(root.path(), &event_path);
+
+            let report = load_plugins([&fixture]);
+
+            assert!(report.errors.is_empty(), "{:?}", report.errors);
+            assert_eq!(names(&report.plugins), ["windows"]);
+            assert_eq!(selected(&report, "windows.mod"), Some("windows"));
+            assert_eq!(selected(&report, "other.mod"), None);
+
+            drop(report);
+
+            #[cfg(windows)]
+            std::fs::remove_file(fixture).expect("unloaded library can be removed");
+            #[cfg(not(windows))]
+            assert_eq!(
+                std::fs::read_to_string(event_path).expect("library unload event"),
+                "unloaded"
+            );
         }
 
         #[test]
@@ -996,7 +1057,9 @@ RVPlaybackPlugin* rv_playback_plugin(void) { return &plugin; }
         fn a_repeated_name_keeps_the_first_file_scanned_and_reports_the_rest() {
             let root = temp_dir();
             let first = descriptor(root.path(), PluginKind::Playback, "twin", 2, "twin");
-            let versioned = root.path().join("twin.1.0.0.so");
+            let versioned = root
+                .path()
+                .join(format!("twin.1.0.0.{}", std::env::consts::DLL_EXTENSION));
             std::fs::copy(&first, &versioned).expect("copy fixture");
 
             let report = load_plugins([root.path()]);

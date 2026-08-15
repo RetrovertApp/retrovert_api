@@ -1,6 +1,6 @@
 //! Host-side Rust bindings for the Retrovert plugin ABI, version 2.
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod c_fixture;
 pub mod ffi;
 pub mod loader;

@@ -17,6 +17,7 @@ thiserror = "2"
 cc = "1"
 
 [dev-dependencies]
+cc = "1"
 tempfile = "3"
 
 [lints]
