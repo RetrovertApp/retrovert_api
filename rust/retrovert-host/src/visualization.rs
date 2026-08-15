@@ -137,6 +137,7 @@ impl VizSnapshot {
 }
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum VisualizationError {
     #[error("scroll mode {0} is unknown")]
     UnknownScrollMode(u32),

@@ -87,6 +87,7 @@ impl Chunk<'_> {
 
 /// A plugin broke the contract `read_data` is written against.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum AbiViolation {
     #[error("status {0} is unknown")]
     UnknownStatus(u32),
@@ -117,6 +118,7 @@ pub enum AbiViolation {
 
 /// Why a session could not start or could not continue.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum SessionError {
     #[error("not a playback plugin")]
     NotPlayback,
@@ -563,7 +565,9 @@ impl core::fmt::Debug for OwnedPlaybackPlugin {
     }
 }
 
+/// Why an owned session operation failed.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum OwnedSessionError {
     #[error(transparent)]
     Session(#[from] SessionError),

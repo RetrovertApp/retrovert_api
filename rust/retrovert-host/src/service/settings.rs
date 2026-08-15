@@ -226,6 +226,7 @@ impl SettingsStore for MemorySettingsStore {
 
 /// Why a registration or a lookup did not succeed.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
 pub enum SettingsError {
     #[error("nothing is registered under '{reg_id}'")]
     NotFound { reg_id: String },

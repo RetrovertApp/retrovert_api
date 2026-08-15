@@ -128,6 +128,7 @@ impl fmt::Debug for LoadedPlugin {
 
 /// Why one path yielded no plugin.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum LoadError {
     #[error("cannot read path: {0}")]
     Path(#[source] std::io::Error),
