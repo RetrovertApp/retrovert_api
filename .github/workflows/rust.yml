@@ -27,3 +27,11 @@ jobs:
 
       - name: Test
         run: cargo test --workspace --all-features
+
+      - name: Check big-endian target
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes gcc-powerpc64-linux-gnu
+          rustup target add powerpc64-unknown-linux-gnu
+          CC_powerpc64_unknown_linux_gnu=powerpc64-linux-gnu-gcc \
+            cargo check -p retrovert-host --target powerpc64-unknown-linux-gnu

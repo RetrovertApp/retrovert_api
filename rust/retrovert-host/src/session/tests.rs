@@ -519,6 +519,18 @@ fn raw(bytes: Vec<u8>, format: RVAudioStreamFormat, frames: u32, channels: u32) 
     }
 }
 
+#[cfg(target_endian = "little")]
+fn s24_ne_bytes(value: i32) -> [u8; 3] {
+    let bytes = value.to_ne_bytes();
+    [bytes[0], bytes[1], bytes[2]]
+}
+
+#[cfg(target_endian = "big")]
+fn s24_ne_bytes(value: i32) -> [u8; 3] {
+    let bytes = value.to_ne_bytes();
+    [bytes[1], bytes[2], bytes[3]]
+}
+
 #[test]
 fn a_native_chunk_describes_itself() {
     let (samples, format, finished) = read(vec![Response::f32(&[0.25, -0.25], 1, 22_050)], None, 2);
@@ -616,11 +628,30 @@ fn repeated_reads_at_the_prepared_budget_do_not_allocate() {
 fn every_stream_format_normalizes_to_f32() {
     let cases = [
         (RVAudioStreamFormat::U8, vec![255_u8, 128], 1.0_f32),
-        (RVAudioStreamFormat::S16, vec![0, 0x40, 0, 0], 0.5),
-        (RVAudioStreamFormat::S24, vec![0, 0, 0x40, 0, 0, 0], 0.5),
+        (
+            RVAudioStreamFormat::S16,
+            16_384_i16
+                .to_ne_bytes()
+                .into_iter()
+                .chain(0_i16.to_ne_bytes())
+                .collect(),
+            0.5,
+        ),
+        (
+            RVAudioStreamFormat::S24,
+            s24_ne_bytes(4_194_304)
+                .into_iter()
+                .chain(s24_ne_bytes(0))
+                .collect(),
+            0.5,
+        ),
         (
             RVAudioStreamFormat::S32,
-            vec![0, 0, 0, 0x40, 0, 0, 0, 0],
+            1_073_741_824_i32
+                .to_ne_bytes()
+                .into_iter()
+                .chain(0_i32.to_ne_bytes())
+                .collect(),
             0.5,
         ),
         (

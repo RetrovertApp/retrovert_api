@@ -5,6 +5,28 @@
 
 use crate::ffi::audio_format::RVAudioStreamFormat;
 
+#[cfg(any(test, target_endian = "little"))]
+fn s24_from_le_bytes(bytes: [u8; 3]) -> i32 {
+    let sign = if bytes[2] & 0x80 == 0 { 0 } else { 0xff };
+    i32::from_le_bytes([bytes[0], bytes[1], bytes[2], sign])
+}
+
+#[cfg(any(test, target_endian = "big"))]
+fn s24_from_be_bytes(bytes: [u8; 3]) -> i32 {
+    let sign = if bytes[0] & 0x80 == 0 { 0 } else { 0xff };
+    i32::from_be_bytes([sign, bytes[0], bytes[1], bytes[2]])
+}
+
+#[cfg(target_endian = "little")]
+fn s24_from_ne_bytes(bytes: [u8; 3]) -> i32 {
+    s24_from_le_bytes(bytes)
+}
+
+#[cfg(target_endian = "big")]
+fn s24_from_ne_bytes(bytes: [u8; 3]) -> i32 {
+    s24_from_be_bytes(bytes)
+}
+
 /// Bytes one sample of `format` occupies in the plugin's buffer.
 pub(crate) fn sample_width(format: RVAudioStreamFormat) -> usize {
     match format {
@@ -40,9 +62,7 @@ pub(crate) fn to_f32(format: RVAudioStreamFormat, input: &[u8], output: &mut [f3
         }
         RVAudioStreamFormat::S24 => {
             for (bytes, sample) in input.chunks_exact(3).zip(output.iter_mut()) {
-                let sign = if bytes[2] & 0x80 == 0 { 0 } else { 0xff };
-                *sample =
-                    i32::from_le_bytes([bytes[0], bytes[1], bytes[2], sign]) as f32 * S24_SCALE;
+                *sample = s24_from_ne_bytes([bytes[0], bytes[1], bytes[2]]) as f32 * S24_SCALE;
             }
         }
         RVAudioStreamFormat::S32 => {
@@ -112,11 +132,74 @@ mod tests {
     }
 
     #[test]
-    fn signed_twenty_four_bit_sign_extends() {
-        let input = [0, 0, 0, 0, 0, 0x40, 0, 0, 0x80, 0, 0, 0xc0];
+    fn signed_twenty_four_bit_little_endian_values_decode() {
+        let input = [
+            0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0xff, 0xff, 0x7f, 0xff, 0xff, 0xff, 0x00, 0x00,
+            0x80,
+        ];
         assert_eq!(
-            convert(RVAudioStreamFormat::S24, &input),
-            [0.0, 0.5, -1.0, -0.5]
+            input
+                .chunks_exact(3)
+                .map(|bytes| s24_from_le_bytes([bytes[0], bytes[1], bytes[2]]))
+                .collect::<Vec<_>>(),
+            [0, 1, 8_388_607, -1, -8_388_608]
+        );
+    }
+
+    #[test]
+    fn signed_twenty_four_bit_big_endian_values_decode() {
+        let input = [
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x7f, 0xff, 0xff, 0xff, 0xff, 0xff, 0x80, 0x00,
+            0x00,
+        ];
+        assert_eq!(
+            input
+                .chunks_exact(3)
+                .map(|bytes| s24_from_be_bytes([bytes[0], bytes[1], bytes[2]]))
+                .collect::<Vec<_>>(),
+            [0, 1, 8_388_607, -1, -8_388_608]
+        );
+    }
+
+    #[cfg(target_endian = "little")]
+    #[test]
+    fn signed_twenty_four_bit_native_conversion_is_little_endian() {
+        assert_eq!(
+            convert(
+                RVAudioStreamFormat::S24,
+                &[
+                    0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0xff, 0xff, 0x7f, 0xff, 0xff, 0xff, 0x00,
+                    0x00, 0x80,
+                ]
+            ),
+            [
+                0.0,
+                1.0 / 8_388_608.0,
+                8_388_607.0 / 8_388_608.0,
+                -1.0 / 8_388_608.0,
+                -1.0
+            ]
+        );
+    }
+
+    #[cfg(target_endian = "big")]
+    #[test]
+    fn signed_twenty_four_bit_native_conversion_is_big_endian() {
+        assert_eq!(
+            convert(
+                RVAudioStreamFormat::S24,
+                &[
+                    0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x7f, 0xff, 0xff, 0xff, 0xff, 0xff, 0x80,
+                    0x00, 0x00,
+                ]
+            ),
+            [
+                0.0,
+                1.0 / 8_388_608.0,
+                8_388_607.0 / 8_388_608.0,
+                -1.0 / 8_388_608.0,
+                -1.0
+            ]
         );
     }
 
