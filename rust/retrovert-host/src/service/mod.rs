@@ -1038,6 +1038,65 @@ mod tests {
     }
 
     #[test]
+    fn invalid_direct_string_registration_leaves_plugin_lookup_recoverable() {
+        let host = ServiceHost::default();
+        let invalid = SettingSchema {
+            id: "filter".to_string(),
+            name: "Filter".to_string(),
+            desc: String::new(),
+            setting: Setting::StrChoice {
+                value: "a\0uto".to_string(),
+                choices: Vec::new(),
+            },
+        };
+
+        assert_eq!(
+            host.settings().register("openmpt", vec![invalid]),
+            Err(SettingsError::InteriorNul {
+                reg_id: "openmpt".to_string(),
+                id: "filter".to_string(),
+            })
+        );
+        assert!(host.settings().reg_ids().is_empty());
+
+        let vtable = settings_vtable(&host);
+        let read = || {
+            // SAFETY: every string passed is a live NUL-terminated literal.
+            unsafe {
+                (vtable.get_string.expect("get_string"))(
+                    vtable.private_data,
+                    c"openmpt".as_ptr(),
+                    c"".as_ptr(),
+                    c"filter".as_ptr(),
+                )
+            }
+        };
+        assert_eq!(read().result, RVSettingsResult::NotFound as u32);
+
+        host.settings()
+            .register(
+                "openmpt",
+                vec![SettingSchema {
+                    id: "filter".to_string(),
+                    name: "Filter".to_string(),
+                    desc: String::new(),
+                    setting: Setting::StrChoice {
+                        value: "auto".to_string(),
+                        choices: Vec::new(),
+                    },
+                }],
+            )
+            .expect("valid retry");
+
+        let first = read();
+        assert_eq!(first.result, RVSettingsResult::Ok as u32);
+        assert!(!first.value.is_null());
+        assert_eq!(read().value, first.value);
+        // SAFETY: the registry owns the string for as long as the host lives.
+        assert_eq!(unsafe { CStr::from_ptr(first.value) }, c"auto");
+    }
+
+    #[test]
     fn null_strings_from_a_plugin_are_refused_and_a_null_ext_reads_as_global() {
         let mut int_choices = [];
         let mut str_choices = [];

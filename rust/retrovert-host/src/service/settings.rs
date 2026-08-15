@@ -341,6 +341,12 @@ impl Registry {
                     id: schema.id.clone(),
                 });
             }
+            if !nul_free(&schema.setting.value()) {
+                return Err(SettingsError::InteriorNul {
+                    reg_id: reg_id.to_string(),
+                    id: schema.id.clone(),
+                });
+            }
         }
 
         let order = self.next_registration_order;
