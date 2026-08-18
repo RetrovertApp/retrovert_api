@@ -26,7 +26,7 @@ pub use settings::{
     SETTING_VALUE_LIMIT,
 };
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 use core::ffi::c_char;
 use core::ffi::{c_int, c_void};
 use core::panic::AssertUnwindSafe;
