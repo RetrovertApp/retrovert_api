@@ -1080,8 +1080,8 @@ fn the_player_forwards_scope_control_and_builds_snapshots() {
         player.set_scope_enabled(false);
 
         assert_eq!(snapshot.output_frame, 321);
-        assert_eq!(snapshot.layout.caps, 0);
-        assert_eq!(snapshot.layout.scroll_mode, RVScrollMode::Synchronized);
+        assert_eq!(snapshot.layout().caps, 0);
+        assert_eq!(snapshot.layout().scroll_mode, RVScrollMode::Synchronized);
     });
     let events = events();
     assert_eq!(

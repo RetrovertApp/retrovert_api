@@ -121,8 +121,9 @@ impl VizLayout {
 pub struct VizSnapshot {
     /// Output-frame position associated with this snapshot.
     pub output_frame: u64,
-    /// Layout that defines all snapshot arrays.
-    pub layout: Arc<VizLayout>,
+    /// Layout that defines all snapshot arrays. Private so it can never disagree
+    /// with the buffer sizes allocated for it; [`capture_snapshot`] trusts that match.
+    layout: Arc<VizLayout>,
     /// Current tracker position, when the plugin reports one.
     pub position: Option<RVTrackerPosition>,
     scope_sample_budget: usize,
@@ -135,6 +136,11 @@ pub struct VizSnapshot {
 }
 
 impl VizSnapshot {
+    /// Returns the layout this snapshot's buffers were allocated for.
+    pub fn layout(&self) -> &Arc<VizLayout> {
+        &self.layout
+    }
+
     /// Returns per-channel tracker rows for per-channel scrolling layouts.
     pub fn channel_rows(&self) -> &[u32] {
         &self.channel_rows
