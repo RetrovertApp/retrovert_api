@@ -763,6 +763,10 @@ impl SettingsHandle {
     ///
     /// Returns [`SettingsError::DuplicateRegId`] or [`SettingsError::DuplicateId`] for
     /// duplicate identifiers, or [`SettingsError::InteriorNul`] for an invalid string default.
+    ///
+    /// # Panics
+    ///
+    /// Propagates a panic from the injected [`SettingsStore::load`] implementation.
     pub fn register(&self, reg_id: &str, schemas: Vec<SettingSchema>) -> Result<(), SettingsError> {
         let registration = PendingRegistration {
             registry: Arc::clone(&self.registry),
@@ -874,6 +878,11 @@ impl SettingsHandle {
     }
 
     /// Writes every changed module to the store. Hosts choose when; the crate never does it.
+    ///
+    /// # Panics
+    ///
+    /// Propagates a panic from the injected [`SettingsStore::save`] implementation after restoring
+    /// the registry's dirty state so the write can be retried.
     pub fn flush(&self) {
         let saves = lock(&self.registry).begin_flush();
         for (index, (reg_id, values, revision)) in saves.iter().enumerate() {
@@ -911,7 +920,10 @@ unsafe fn read_schemas(
         return Ok(Vec::new());
     }
 
-    let mut schemas = Vec::with_capacity(count);
+    let mut schemas = Vec::new();
+    schemas
+        .try_reserve_exact(count)
+        .map_err(|_| RVSettingsResult::InvalidCount)?;
     let settings = settings.cast::<RVSettingWire>();
     for index in 0..count {
         // SAFETY: the validated count and caller-provided array cover this element.
@@ -1046,7 +1058,10 @@ unsafe fn read_int_choices(
     }
     // SAFETY: the caller guarantees `count` initialized entries from `values`.
     let entries = unsafe { core::slice::from_raw_parts(values, count) };
-    let mut choices = Vec::with_capacity(count);
+    let mut choices = Vec::new();
+    choices
+        .try_reserve_exact(count)
+        .map_err(|_| RVSettingsResult::InvalidCount)?;
     for entry in entries {
         // SAFETY: the caller guarantees a bounded readable name.
         let name = unsafe { plugin_str(entry.name, SETTING_LABEL_LIMIT) }
@@ -1075,7 +1090,10 @@ unsafe fn read_str_choices(
     }
     // SAFETY: the caller guarantees `count` initialized entries from `values`.
     let entries = unsafe { core::slice::from_raw_parts(values, count) };
-    let mut choices = Vec::with_capacity(count);
+    let mut choices = Vec::new();
+    choices
+        .try_reserve_exact(count)
+        .map_err(|_| RVSettingsResult::InvalidCount)?;
     for entry in entries {
         // SAFETY: the caller guarantees bounded readable strings.
         let (name, value) = unsafe {

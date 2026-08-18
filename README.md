@@ -5,8 +5,8 @@ API for Retrovert
 
 - `include/retrovert/` — the C headers plugins and hosts build against.
 - `api/` — api_gen `.def` sources the generated headers come from; see `gen-bindings.sh`.
-- `rust/retrovert-host/` — private safe-Rust host crate, consumed only by path dependency and
-  not published to crates.io.
+- `rust/retrovert-host/` — Rust host crate with an audited native-FFI boundary, published from this
+  repository for Cargo Git dependencies. It is intentionally not published to crates.io.
 - `rust/abi-parity/` — bindgen gate asserting the crate's `#[repr(C)]` mirror matches
   the headers. Kept out of `retrovert-host` so consumers never build bindgen.
 - `ci/build.yml` — CMake workflow template copied into playback plugin repositories by
@@ -19,6 +19,22 @@ the normal Rust test job.
 ```bash
 cd rust && cargo test
 ```
+
+## Using `retrovert-host` from Cargo
+
+Use the public repository as a Git dependency and pin an exact, reviewed commit. Replace
+`FULL_COMMIT_SHA` with the complete 40-character commit ID; do not depend on the mutable default
+branch.
+
+```toml
+[dependencies]
+retrovert-host = { git = "https://github.com/RetrovertApp/retrovert_api", rev = "FULL_COMMIT_SHA" }
+```
+
+The crate has no path or Git dependencies of its own. Cargo discovers it under the repository's
+`rust/` workspace; consumers do not need a sibling `retrovert_api` checkout or the `abi-parity`
+workspace member. Release tags use the `retrovert-host-vMAJOR.MINOR.PATCH` form and must never be
+moved after publication; consumers should still retain the resolved commit in `Cargo.lock`.
 
 ## Minimum supported Rust version
 

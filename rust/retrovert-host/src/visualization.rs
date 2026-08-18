@@ -100,6 +100,7 @@ impl VizLayout {
             output_frame: 0,
             layout: Arc::clone(self),
             position: None,
+            scope_sample_budget: self.config.scope_sample_budget as usize,
             channel_rows,
             cells,
             cell_count: 0,
@@ -124,6 +125,7 @@ pub struct VizSnapshot {
     pub layout: Arc<VizLayout>,
     /// Current tracker position, when the plugin reports one.
     pub position: Option<RVTrackerPosition>,
+    scope_sample_budget: usize,
     channel_rows: Box<[u32]>,
     cells: Box<[RVPatternCell]>,
     cell_count: usize,
@@ -151,7 +153,7 @@ impl VizSnapshot {
     /// Returns populated scope samples for `channel`, or `None` when it is absent.
     pub fn scope(&self, channel: usize) -> Option<&[f32]> {
         let &count = self.scope_counts.get(channel)?;
-        let budget = self.layout.config.scope_sample_budget as usize;
+        let budget = self.scope_sample_budget;
         let start = channel * budget;
         Some(&self.scope[start..start + count as usize])
     }
@@ -192,6 +194,14 @@ pub enum VisualizationError {
     /// Derived visualization dimensions overflowed their ABI or host representation.
     #[error("visualization dimensions overflow the ABI count")]
     DimensionOverflow,
+    /// The plugin reported a tracker window whose upper bound precedes its lower bound.
+    #[error("tracker window upper bound {window_hi} precedes lower bound {window_lo}")]
+    InvalidTrackerWindow {
+        /// Inclusive lower row bound reported by the plugin.
+        window_lo: u32,
+        /// Exclusive upper row bound reported by the plugin.
+        window_hi: u32,
+    },
     /// A plugin-reported dimension exceeds the host limit.
     #[error("visualization {dimension} {actual} exceeds the configured limit {limit}")]
     DimensionLimit {
@@ -400,7 +410,12 @@ pub(crate) fn capture_snapshot(
 
     if let Some(position) = snapshot.position {
         if layout.caps & RVVizCaps::PATTERN_CELLS != 0 {
-            let rows = position.window_hi.saturating_sub(position.window_lo);
+            let rows = position.window_hi.checked_sub(position.window_lo).ok_or(
+                VisualizationError::InvalidTrackerWindow {
+                    window_lo: position.window_lo,
+                    window_hi: position.window_hi,
+                },
+            )?;
             check_limit("pattern row count", rows, layout.config.pattern_row_budget)?;
             let count = (rows as usize)
                 .checked_mul(layout.pattern_channels.len())
@@ -704,6 +719,23 @@ mod tests {
         true
     }
 
+    unsafe extern "C" fn inverted_position(
+        _instance: *mut c_void,
+        out: *mut RVTrackerPosition,
+    ) -> bool {
+        // SAFETY: the test builder supplies a writable position.
+        unsafe {
+            *out = RVTrackerPosition {
+                order: 0,
+                pattern: 0,
+                row: 0,
+                window_lo: 2,
+                window_hi: 1,
+            }
+        };
+        true
+    }
+
     unsafe extern "C" fn rows(_instance: *mut c_void, out: *mut u32, cap: u32) -> u32 {
         let values = [10, 20, 30];
         let count = values.len().min(cap as usize);
@@ -846,21 +878,31 @@ mod tests {
 
     #[test]
     fn invalid_structure_values_are_rejected() {
-        let mut plugin = plugin();
-        plugin.viz_info = Some(unknown_scroll_info);
+        let mut bad = plugin();
+        bad.viz_info = Some(unknown_scroll_info);
         assert!(matches!(
-            build_for_test(&plugin, 0, 7),
+            build_for_test(&bad, 0, 7),
             Err(VisualizationError::UnknownScrollMode(99))
         ));
 
-        plugin.viz_info = Some(overflowing_info);
-        plugin.tracker_columns = Some(full_columns);
-        plugin.tracker_channels = Some(full_channels);
-        plugin.scope_channels = None;
-        plugin.tracker_position = Some(one_row_position);
+        bad.viz_info = Some(overflowing_info);
+        bad.tracker_columns = Some(full_columns);
+        bad.tracker_channels = Some(full_channels);
+        bad.scope_channels = None;
+        bad.tracker_position = Some(one_row_position);
         assert!(matches!(
-            build_for_test(&plugin, 0, 7),
+            build_for_test(&bad, 0, 7),
             Err(VisualizationError::DimensionLimit { .. })
+        ));
+
+        let mut bad = plugin();
+        bad.tracker_position = Some(inverted_position);
+        assert!(matches!(
+            build_for_test(&bad, 0, 7),
+            Err(VisualizationError::InvalidTrackerWindow {
+                window_lo: 2,
+                window_hi: 1,
+            })
         ));
     }
 

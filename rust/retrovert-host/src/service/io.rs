@@ -2,6 +2,8 @@
 
 use core::ffi::{c_char, c_void};
 use core::ptr;
+use std::fs::File;
+use std::io::Read;
 use std::path::Path;
 
 use crate::ffi::io::RVIoReadUrlResult;
@@ -10,6 +12,8 @@ use crate::service::{context, guard};
 
 /// Longest URL or path accepted from an I/O callback, in bytes.
 pub const IO_URL_LIMIT: usize = 64 * 1024;
+/// Largest whole-file buffer the I/O service returns to a plugin.
+pub const IO_DATA_LIMIT: usize = 256 * 1024 * 1024;
 
 /// File access a host lends to plugins.
 ///
@@ -20,8 +24,11 @@ pub trait Io: Send + Sync {
     /// Returns whether `url` can be read by this backend.
     fn exists(&self, url: &str) -> bool;
 
-    /// `None` when the url cannot be read.
-    fn read_to_memory(&self, url: &str) -> Option<Vec<u8>>;
+    /// `None` when the url cannot be read within `max_bytes`.
+    ///
+    /// Implementations must enforce `max_bytes` before allocating storage controlled by the
+    /// resource size.
+    fn read_to_memory(&self, url: &str, max_bytes: usize) -> Option<Vec<u8>>;
 }
 
 /// The default [`Io`]: local files through `std::fs`.
@@ -32,8 +39,23 @@ impl Io for StdFsIo {
         Path::new(url).exists()
     }
 
-    fn read_to_memory(&self, url: &str) -> Option<Vec<u8>> {
-        std::fs::read(url).ok()
+    fn read_to_memory(&self, url: &str, max_bytes: usize) -> Option<Vec<u8>> {
+        let mut file = File::open(url).ok()?;
+        let byte_count = usize::try_from(file.metadata().ok()?.len()).ok()?;
+        if byte_count > max_bytes {
+            return None;
+        }
+
+        let mut bytes = Vec::new();
+        bytes.try_reserve_exact(byte_count).ok()?;
+        bytes.resize(byte_count, 0);
+        file.read_exact(&mut bytes).ok()?;
+
+        let mut trailing = [0];
+        if file.read(&mut trailing).ok()? != 0 {
+            return None;
+        }
+        Some(bytes)
     }
 }
 
@@ -71,11 +93,11 @@ pub(super) unsafe extern "C" fn read_url_to_memory(
         let Some(bytes) = url
             .ok()
             .flatten()
-            .and_then(|url| ctx.io.read_to_memory(&url))
+            .and_then(|url| ctx.io.read_to_memory(&url, IO_DATA_LIMIT))
         else {
             return empty;
         };
-        if bytes.is_empty() {
+        if bytes.is_empty() || bytes.len() > IO_DATA_LIMIT {
             return empty;
         }
 

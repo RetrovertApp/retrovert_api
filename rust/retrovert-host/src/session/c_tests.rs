@@ -96,6 +96,25 @@ static RVPlaybackPlugin plugin = {
 RVPlaybackPlugin* rv_playback_plugin(void) { return &plugin; }
 "#;
 
+fn load_test_plugins<I, P>(paths: I) -> LoadReport
+where
+    I: IntoIterator<Item = P>,
+    P: AsRef<Path>,
+{
+    load_plugins(paths)
+}
+
+fn test_plugin<'a>(loaded: &'a mut LoadedPlugin, host: &'a ServiceHost) -> Plugin<'a> {
+    Plugin::new(loaded, host).expect("playback plugin")
+}
+
+fn owned_test_runtime(
+    plugins: crate::loader::PluginSet,
+    host: ServiceHost,
+) -> OwnedPlaybackRuntime {
+    OwnedPlaybackRuntime::new(plugins, host)
+}
+
 const OWNED_FIXTURE: &str = r#"
 #include <stdio.h>
 #include <stdlib.h>
@@ -249,8 +268,9 @@ impl Io for DropLoggingIo {
         Path::new(url).exists()
     }
 
-    fn read_to_memory(&self, url: &str) -> Option<Vec<u8>> {
-        std::fs::read(url).ok()
+    fn read_to_memory(&self, url: &str, max_bytes: usize) -> Option<Vec<u8>> {
+        let bytes = std::fs::read(url).ok()?;
+        (bytes.len() <= max_bytes).then_some(bytes)
     }
 }
 
@@ -290,7 +310,7 @@ fn host(log: Arc<dyn Log>) -> ServiceHost {
 /// Builds the fixture into a fresh directory and loads it.
 fn load_fixture(dir: &tempfile::TempDir) -> LoadReport {
     compile(dir.path(), "session_fixture", FIXTURE);
-    let report = load_plugins([dir.path()]);
+    let report = load_test_plugins([dir.path()]);
     assert!(report.errors.is_empty(), "{:?}", report.errors);
     report
 }
@@ -300,7 +320,7 @@ fn owned_fixture(
     event_name: &str,
 ) -> (OwnedPlaybackRuntime, OwnedPlaybackPlugin, PathBuf) {
     compile(dir.path(), "owned_session_fixture", OWNED_FIXTURE);
-    let report = load_plugins([dir.path()]);
+    let report = load_test_plugins([dir.path()]);
     assert!(report.errors.is_empty(), "{:?}", report.errors);
     let events = dir.path().join(event_name);
     let host = ServiceHost::new(
@@ -310,7 +330,7 @@ fn owned_fixture(
         Arc::new(CapturingLog::default()),
         Box::new(MemorySettingsStore::default()),
     );
-    let runtime = OwnedPlaybackRuntime::new(report.plugins, host);
+    let runtime = owned_test_runtime(report.plugins, host);
     let plugin = runtime
         .select(&[1], "owned.mod", 1)
         .expect("owned playback plugin");
@@ -350,7 +370,7 @@ fn a_c_plugin_plays_through_the_session() {
     let captured = Arc::new(CapturingLog::default());
     let host = host(captured.clone());
     {
-        let plugin = Plugin::new(loaded, &host).expect("playback plugin");
+        let plugin = test_plugin(loaded, &host);
         assert_eq!(fixture_inits(&fixture_path), 1, "static_init did not run");
 
         // Subsong 4 seeds the ramp, so the samples prove the argument reached the plugin.
@@ -395,7 +415,7 @@ fn a_c_plugin_plays_through_the_session() {
     );
 
     {
-        let _plugin = Plugin::new(loaded, &host).expect("sequential plugin");
+        let _plugin = test_plugin(loaded, &host);
         assert_eq!(fixture_inits(&fixture_path), 1, "static_init did not rerun");
     }
     assert_eq!(
@@ -601,7 +621,7 @@ fn every_owned_catalog_plugin_initializes_and_tears_down_once() {
         );
     compile(dir.path(), "alpha_fixture", &alpha);
     compile(dir.path(), "beta_fixture", &beta);
-    let report = load_plugins([dir.path()]);
+    let report = load_test_plugins([dir.path()]);
     assert!(report.errors.is_empty(), "{:?}", report.errors);
     let host = ServiceHost::new(
         Box::new(DropLoggingIo {
@@ -610,7 +630,7 @@ fn every_owned_catalog_plugin_initializes_and_tears_down_once() {
         Arc::new(CapturingLog::default()),
         Box::new(MemorySettingsStore::default()),
     );
-    let runtime = OwnedPlaybackRuntime::new(report.plugins, host);
+    let runtime = owned_test_runtime(report.plugins, host);
     let alpha = runtime.select(&[1], "alpha.mod", 1).expect("alpha plugin");
     let beta = runtime.select(&[1], "beta.mod", 1).expect("beta plugin");
     let alpha_session = alpha
@@ -643,7 +663,7 @@ fn owned_runtime_accepts_optional_static_teardown() {
         ".static_init = static_init, .static_destroy = NULL,",
     );
     compile(dir.path(), "optional_teardown_fixture", &source);
-    let report = load_plugins([dir.path()]);
+    let report = load_test_plugins([dir.path()]);
     assert!(report.errors.is_empty(), "{:?}", report.errors);
     let events = dir.path().join("optional-events");
     let host = ServiceHost::new(
@@ -653,7 +673,7 @@ fn owned_runtime_accepts_optional_static_teardown() {
         Arc::new(CapturingLog::default()),
         Box::new(MemorySettingsStore::default()),
     );
-    let runtime = OwnedPlaybackRuntime::new(report.plugins, host);
+    let runtime = owned_test_runtime(report.plugins, host);
     let plugin = runtime.select(&[1], "owned.mod", 1).expect("owned plugin");
     let session = plugin
         .open_prepared(events.to_str().expect("event path"), 0, 8, None)
@@ -726,7 +746,7 @@ fn a_target_format_reaches_the_mixer_ready() {
     let loaded = playback(&mut report);
 
     let host = host(Arc::new(CapturingLog::default()));
-    let plugin = Plugin::new(loaded, &host).expect("playback plugin");
+    let plugin = test_plugin(loaded, &host);
     let target = StreamFormat {
         sample_rate: 44_100,
         channels: 2,
@@ -762,7 +782,7 @@ RVResamplePlugin* rv_resample_plugin(void) { return &plugin; }
 
     let dir = tempfile::tempdir().expect("temp dir");
     compile(dir.path(), "resample_fixture", RESAMPLER);
-    let mut report = load_plugins([dir.path()]);
+    let mut report = load_test_plugins([dir.path()]);
     let loaded = report
         .plugins
         .of_kind_mut(PluginKind::Resample)
@@ -783,7 +803,7 @@ fn a_panicking_host_service_does_not_unwind_into_the_plugin() {
     let loaded = playback(&mut report);
 
     let host = host(Arc::new(PanickingLog));
-    let plugin = Plugin::new(loaded, &host).expect("playback plugin");
+    let plugin = test_plugin(loaded, &host);
     let mut player = plugin
         .open("song.mod", 0)
         .expect("open")

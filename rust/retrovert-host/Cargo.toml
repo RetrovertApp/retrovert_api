@@ -5,6 +5,7 @@ edition = "2021"
 rust-version.workspace = true
 license = "MIT"
 description = "Host-side Rust bindings for the Retrovert plugin ABI"
+repository = "https://github.com/RetrovertApp/retrovert_api"
 publish = false
 
 [dependencies]

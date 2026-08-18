@@ -9,7 +9,7 @@ mod log;
 mod metadata;
 mod settings;
 
-pub use io::{Io, StdFsIo, IO_URL_LIMIT};
+pub use io::{Io, StdFsIo, IO_DATA_LIMIT, IO_URL_LIMIT};
 pub use log::{
     retrovert_host_log_write, Log, LogCrate, LogLevel, LOG_FILE_LIMIT, LOG_MESSAGE_LIMIT,
 };
@@ -86,8 +86,11 @@ pub struct ServiceHost {
     settings: SettingsHandle,
 }
 
-// SAFETY: the context is only reachable through `ServiceHost`, which owns it exclusively,
-// and everything it holds is `Send`.
+// SAFETY: `ctx` points to a stable heap allocation owned exclusively by this value, so moving
+// `ServiceHost` between threads does not invalidate any vtable back-pointer. Every callback target
+// reachable through that allocation is `Send + Sync`; `ServiceHost` is deliberately not `Sync`.
+// The public service reference is tied to `&self`, and the FFI contract requires plugins to stop
+// all callbacks before the host is dropped.
 unsafe impl Send for ServiceHost {}
 
 impl Default for ServiceHost {
@@ -286,7 +289,7 @@ mod tests {
             panic!("host io blew up")
         }
 
-        fn read_to_memory(&self, _url: &str) -> Option<Vec<u8>> {
+        fn read_to_memory(&self, _url: &str, _max_bytes: usize) -> Option<Vec<u8>> {
             panic!("host io blew up")
         }
     }
@@ -301,7 +304,7 @@ mod tests {
             true
         }
 
-        fn read_to_memory(&self, url: &str) -> Option<Vec<u8>> {
+        fn read_to_memory(&self, url: &str, _max_bytes: usize) -> Option<Vec<u8>> {
             self.urls.lock().expect("urls").push(url.to_owned());
             Some(vec![1])
         }
@@ -514,6 +517,20 @@ mod tests {
             );
             (vtable.free_url_to_memory.expect("free"))(vtable.private_data, read.data.cast());
         }
+    }
+
+    #[test]
+    fn the_default_io_rejects_files_larger_than_the_caller_budget() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("song.mod");
+        std::fs::write(&path, b"payload").expect("write");
+        let path = path.to_str().expect("utf-8 path");
+
+        assert!(StdFsIo.read_to_memory(path, 6).is_none());
+        assert_eq!(
+            StdFsIo.read_to_memory(path, 7).as_deref(),
+            Some(&b"payload"[..])
+        );
     }
 
     #[test]

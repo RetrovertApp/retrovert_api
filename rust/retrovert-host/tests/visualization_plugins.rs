@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 
 use retrovert_host::ffi::playback::{RVPlaybackPlugin, RVScrollMode, RVVizCaps};
-use retrovert_host::loader::{load_plugins, PluginKind};
+use retrovert_host::loader::{load_plugins, LoadedPlugin, PluginKind};
 use retrovert_host::service::ServiceHost;
 use retrovert_host::session::Plugin;
 use retrovert_host::visualization::VisualizationConfig;
@@ -25,6 +25,14 @@ fn resolved(env: &str, relative: &str) -> PathBuf {
     )
 }
 
+fn load_test_plugin(path: &Path) -> retrovert_host::loader::LoadReport {
+    load_plugins([path])
+}
+
+fn start_test_plugin<'a>(loaded: &'a mut LoadedPlugin, host: &'a ServiceHost) -> Plugin<'a> {
+    Plugin::new(loaded, host).expect("plugin lifecycle")
+}
+
 fn exercise(case: Case) {
     let plugin_path = resolved(case.plugin_env, case.plugin_path);
     let module_path = resolved(case.module_env, case.module_path);
@@ -41,7 +49,7 @@ fn exercise(case: Case) {
         module_path.display()
     );
 
-    let mut report = load_plugins([&plugin_path]);
+    let mut report = load_test_plugin(&plugin_path);
     assert!(
         report.errors.is_empty(),
         "{}: {:?}",
@@ -54,7 +62,7 @@ fn exercise(case: Case) {
         .next()
         .expect("playback descriptor");
     let host = ServiceHost::default();
-    let plugin = Plugin::new(loaded, &host).expect("plugin lifecycle");
+    let plugin = start_test_plugin(loaded, &host);
     let player = plugin
         .open(module_path.to_str().expect("UTF-8 module path"), 0)
         .expect("open module");
@@ -184,7 +192,7 @@ fn exercise(case: Case) {
 }
 
 fn decode_prefix(plugin_path: &Path, module_path: &Path, budget: u32, frames: usize) -> Vec<f32> {
-    let mut report = load_plugins([plugin_path]);
+    let mut report = load_test_plugin(plugin_path);
     assert!(report.errors.is_empty(), "{:?}", report.errors);
     let loaded = report
         .plugins
@@ -192,7 +200,7 @@ fn decode_prefix(plugin_path: &Path, module_path: &Path, budget: u32, frames: us
         .next()
         .expect("playback descriptor");
     let host = ServiceHost::default();
-    let plugin = Plugin::new(loaded, &host).expect("plugin lifecycle");
+    let plugin = start_test_plugin(loaded, &host);
     let player = plugin
         .open(module_path.to_str().expect("UTF-8 module path"), 0)
         .expect("open module");
@@ -544,7 +552,7 @@ fn no_visualization_plugins_keep_every_viz_slot_null() {
             "{name}: plugin {} is not built",
             path.display()
         );
-        let report = load_plugins([&path]);
+        let report = load_test_plugin(&path);
         assert!(report.errors.is_empty(), "{name}: {:?}", report.errors);
         let plugin: &RVPlaybackPlugin = report
             .plugins

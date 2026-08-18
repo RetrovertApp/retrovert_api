@@ -25,6 +25,8 @@ pub const PLUGIN_NAME_LIMIT: usize = 128;
 pub const PLUGIN_VERSION_LIMIT: usize = 64;
 /// Longest underlying-library version accepted from a descriptor, in bytes.
 pub const PLUGIN_LIBRARY_VERSION_LIMIT: usize = 256;
+/// Largest prefix offered to playback probes.
+pub const PLAYBACK_PROBE_DATA_LIMIT: usize = 64 * 1024;
 
 /// Accepted on every platform, so a plugin built elsewhere still loads here.
 const PLUGIN_EXTENSIONS: [&str; 4] = ["so", "dylib", "dll", "rvp"];
@@ -260,7 +262,8 @@ impl PluginSet {
     /// Offers the file to each playback plugin in order: the first `Supported` wins,
     /// otherwise the first `Unsure`.
     ///
-    /// `data` is the leading bytes of the file, `total_size` its full length.
+    /// `data` is the leading bytes of the file, `total_size` its full length. Empty prefixes and
+    /// prefixes larger than [`PLAYBACK_PROBE_DATA_LIMIT`] are rejected without calling a plugin.
     pub fn select_playback(
         &self,
         data: &[u8],
@@ -284,7 +287,7 @@ pub(crate) fn select_playback_candidate<'a, T: 'a>(
     filename: &str,
     total_size: u64,
 ) -> Option<&'a T> {
-    if data.is_empty() {
+    if data.is_empty() || data.len() > PLAYBACK_PROBE_DATA_LIMIT {
         return None;
     }
     let filename = CString::new(filename).ok()?;
@@ -294,7 +297,11 @@ pub(crate) fn select_playback_candidate<'a, T: 'a>(
         let Some(probe) = descriptor(candidate).and_then(|plugin| plugin.probe_can_play) else {
             continue;
         };
-        let mut probe_data = data.to_vec();
+        let mut probe_data = Vec::new();
+        if probe_data.try_reserve_exact(data.len()).is_err() {
+            break;
+        }
+        probe_data.extend_from_slice(data);
         // SAFETY: each plugin receives a private writable copy and a live C string.
         let raw = unsafe {
             probe(
@@ -323,6 +330,9 @@ pub struct LoadReport {
 }
 
 /// Loads every plugin reachable from `paths`, in the default probe order.
+///
+/// Native libraries are executable code and should come from the host's trusted plugin installation
+/// paths. ABI descriptor validation happens before a plugin is added to the returned set.
 pub fn load_plugins<I, P>(paths: I) -> LoadReport
 where
     I: IntoIterator<Item = P>,
@@ -557,6 +567,22 @@ unsafe fn descriptor_string(
 mod tests {
     use super::*;
 
+    fn load_test_plugins<I, P>(paths: I) -> LoadReport
+    where
+        I: IntoIterator<Item = P>,
+        P: AsRef<Path>,
+    {
+        load_plugins(paths)
+    }
+
+    fn load_test_plugins_ordered<I, P>(paths: I, order: &ProbeOrder) -> LoadReport
+    where
+        I: IntoIterator<Item = P>,
+        P: AsRef<Path>,
+    {
+        load_plugins_ordered(paths, order)
+    }
+
     fn temp_dir() -> tempfile::TempDir {
         tempfile::tempdir().expect("temp dir")
     }
@@ -591,7 +617,7 @@ mod tests {
         touch(root.path(), "notes.txt");
         touch(root.path(), "extensionless");
 
-        let report = load_plugins([root.path()]);
+        let report = load_test_plugins([root.path()]);
 
         assert!(report.plugins.plugins().is_empty());
         assert_eq!(error_paths(&report), expected);
@@ -605,7 +631,7 @@ mod tests {
         touch(&nested, "buried.so");
         std::fs::create_dir(root.path().join("bundle.so")).expect("mkdir");
 
-        let report = load_plugins([root.path()]);
+        let report = load_test_plugins([root.path()]);
 
         assert!(report.errors.is_empty(), "{:?}", report.errors);
         assert!(report.plugins.plugins().is_empty());
@@ -616,7 +642,7 @@ mod tests {
         let root = temp_dir();
         let named = touch(root.path(), "plugin.bin");
 
-        let report = load_plugins([&named]);
+        let report = load_test_plugins([&named]);
 
         assert_eq!(error_paths(&report), [named]);
     }
@@ -627,7 +653,7 @@ mod tests {
         let missing = root.path().join("gone");
         let present = touch(root.path(), "present.so");
 
-        let report = load_plugins([&missing, &present]);
+        let report = load_test_plugins([&missing, &present]);
 
         assert_eq!(report.errors.len(), 2);
         assert!(matches!(report.errors[0].source, LoadError::Path(_)));
@@ -661,10 +687,10 @@ mod tests {
     }
 
     #[test]
-    fn the_dependency_graph_carries_neither_flowi_nor_anyhow() {
+    fn the_dependency_graph_carries_neither_flowi_nor_api_gen() {
         let manifest = include_str!("../Cargo.toml");
         let lock = include_str!("../../Cargo.lock");
-        for forbidden in ["anyhow", "flowi"] {
+        for forbidden in ["api_gen", "flowi"] {
             assert!(!manifest.contains(forbidden), "{forbidden} in Cargo.toml");
             assert!(!lock.contains(forbidden), "{forbidden} in Cargo.lock");
         }
@@ -867,7 +893,7 @@ RVPlaybackPlugin* rv_playback_plugin(void) { return &plugin; }
                 "converter",
             );
 
-            let report = load_plugins([root.path()]);
+            let report = load_test_plugins([root.path()]);
 
             assert!(report.errors.is_empty(), "{:?}", report.errors);
             assert_eq!(names(&report.plugins), ["converter", "player", "speaker"]);
@@ -905,7 +931,7 @@ RVPlaybackPlugin* rv_playback_plugin(void) { return &plugin; }
             let event_path = root.path().join("unload-event");
             let fixture = unload_notifier(root.path(), &event_path);
 
-            let report = load_plugins([&fixture]);
+            let report = load_test_plugins([&fixture]);
 
             assert!(report.errors.is_empty(), "{:?}", report.errors);
             assert_eq!(names(&report.plugins), ["windows"]);
@@ -938,7 +964,7 @@ RVPlaybackPlugin* rv_playback_plugin(void) { return &plugin; }
                 ),
             ];
 
-            let report = load_plugins(&stale);
+            let report = load_test_plugins(&stale);
 
             assert!(report.plugins.plugins().is_empty());
             assert_eq!(report.errors.len(), 3);
@@ -965,7 +991,7 @@ RVPlaybackPlugin* rv_playback_plugin(void) { return &plugin; }
             let root = temp_dir();
             let broken = unresolved_symbol(root.path());
 
-            let report = load_plugins([&broken]);
+            let report = load_test_plugins([&broken]);
 
             assert!(report.plugins.plugins().is_empty());
             assert_eq!(report.errors.len(), 1);
@@ -985,7 +1011,7 @@ RVPlaybackPlugin* rv_playback_plugin(void) { return &plugin; }
             let missing_entry = no_entry_point(root.path());
             let good = descriptor(root.path(), PluginKind::Playback, "good", 2, "good");
 
-            let report = load_plugins([&null, &anonymous, &blank, &missing_entry, &good]);
+            let report = load_test_plugins([&null, &anonymous, &blank, &missing_entry, &good]);
 
             assert_eq!(names(&report.plugins), ["good"]);
             assert!(matches!(
@@ -1014,7 +1040,7 @@ RVPlaybackPlugin* rv_playback_plugin(void) { return &plugin; }
                 &"v".repeat(PLUGIN_VERSION_LIMIT),
                 &"l".repeat(PLUGIN_LIBRARY_VERSION_LIMIT),
             );
-            let report = load_plugins([exact]);
+            let report = load_test_plugins([exact]);
             assert_eq!(report.plugins.plugins().len(), 1);
             assert!(report.errors.is_empty());
 
@@ -1042,7 +1068,7 @@ RVPlaybackPlugin* rv_playback_plugin(void) { return &plugin; }
                 ),
             ] {
                 let path = descriptor_fields(root.path(), stem, &name, &version, &library_version);
-                let report = load_plugins([path]);
+                let report = load_test_plugins([path]);
                 assert!(matches!(
                     report.errors[0].source,
                     LoadError::DescriptorStringLimit {
@@ -1062,7 +1088,7 @@ RVPlaybackPlugin* rv_playback_plugin(void) { return &plugin; }
                 .join(format!("twin.1.0.0.{}", std::env::consts::DLL_EXTENSION));
             std::fs::copy(&first, &versioned).expect("copy fixture");
 
-            let report = load_plugins([root.path()]);
+            let report = load_test_plugins([root.path()]);
 
             assert_eq!(names(&report.plugins), ["twin"]);
             assert_eq!(report.plugins.plugins()[0].path(), versioned);
@@ -1083,7 +1109,7 @@ RVPlaybackPlugin* rv_playback_plugin(void) { return &plugin; }
             descriptor(root.path(), PluginKind::Playback, "a_shared", 2, "shared");
             descriptor(root.path(), PluginKind::Output, "b_shared", 2, "shared");
 
-            let report = load_plugins([root.path()]);
+            let report = load_test_plugins([root.path()]);
 
             assert!(report.errors.is_empty(), "{:?}", report.errors);
             assert_eq!(names(&report.plugins), ["shared", "shared"]);
@@ -1096,7 +1122,7 @@ RVPlaybackPlugin* rv_playback_plugin(void) { return &plugin; }
                 descriptor(root.path(), PluginKind::Playback, name, 2, name);
             }
 
-            let report = load_plugins([root.path()]);
+            let report = load_test_plugins([root.path()]);
 
             assert_eq!(
                 names(&report.plugins),
@@ -1115,7 +1141,7 @@ RVPlaybackPlugin* rv_playback_plugin(void) { return &plugin; }
                 last: vec!["libopenmpt".to_owned()],
             };
 
-            let report = load_plugins_ordered([root.path()], &order);
+            let report = load_test_plugins_ordered([root.path()], &order);
 
             assert_eq!(
                 names(&report.plugins),
@@ -1133,13 +1159,13 @@ RVPlaybackPlugin* rv_playback_plugin(void) { return &plugin; }
 
             // A later definite claim beats an earlier guess.
             assert_eq!(
-                selected(&load_plugins([root.path()]), "song.mod"),
+                selected(&load_test_plugins([root.path()]), "song.mod"),
                 Some("d_claims")
             );
 
             std::fs::remove_file(&claiming).expect("remove fixture");
             assert_eq!(
-                selected(&load_plugins([root.path()]), "song.mod"),
+                selected(&load_test_plugins([root.path()]), "song.mod"),
                 Some("b_guesses")
             );
         }
@@ -1149,7 +1175,7 @@ RVPlaybackPlugin* rv_playback_plugin(void) { return &plugin; }
             let root = temp_dir();
             answering(root.path(), "declines", "Unsupported");
 
-            let report = load_plugins([root.path()]);
+            let report = load_test_plugins([root.path()]);
 
             assert_eq!(selected(&report, "song.mod"), None);
         }
@@ -1160,7 +1186,7 @@ RVPlaybackPlugin* rv_playback_plugin(void) { return &plugin; }
             descriptor(root.path(), PluginKind::Playback, "a_silent", 2, "a_silent");
             answering(root.path(), "b_guesses", "Unsure");
 
-            let report = load_plugins([root.path()]);
+            let report = load_test_plugins([root.path()]);
 
             assert_eq!(names(&report.plugins), ["a_silent", "b_guesses"]);
             assert_eq!(selected(&report, "song.mod"), Some("b_guesses"));
@@ -1180,7 +1206,7 @@ RVPlaybackPlugin* rv_playback_plugin(void) { return &plugin; }
                 "return data[0] == 's' ? RVProbeResult_Supported : RVProbeResult_Unsupported;",
             );
 
-            let report = load_plugins([root.path()]);
+            let report = load_test_plugins([root.path()]);
 
             assert_eq!(selected(&report, "song.mod"), Some("b_reads"));
         }
@@ -1196,7 +1222,7 @@ RVPlaybackPlugin* rv_playback_plugin(void) { return &plugin; }
                        ? RVProbeResult_Supported : RVProbeResult_Unsupported;"#,
             );
 
-            let report = load_plugins([root.path()]);
+            let report = load_test_plugins([root.path()]);
 
             assert_eq!(
                 report
@@ -1213,7 +1239,7 @@ RVPlaybackPlugin* rv_playback_plugin(void) { return &plugin; }
             let root = temp_dir();
             let fixture = answering(root.path(), "counter", "Supported");
 
-            let report = load_plugins([&fixture]);
+            let report = load_test_plugins([&fixture]);
             assert_eq!(probe_calls(&fixture), 0);
 
             // Neither an empty buffer nor an unrepresentable filename reaches a plugin.
@@ -1221,6 +1247,14 @@ RVPlaybackPlugin* rv_playback_plugin(void) { return &plugin; }
             assert!(report
                 .plugins
                 .select_playback(b"song", "song\0.mod", 4)
+                .is_none());
+            assert!(report
+                .plugins
+                .select_playback(
+                    &vec![b'x'; PLAYBACK_PROBE_DATA_LIMIT + 1],
+                    "song.mod",
+                    PLAYBACK_PROBE_DATA_LIMIT as u64 + 1,
+                )
                 .is_none());
             assert_eq!(probe_calls(&fixture), 0);
 
