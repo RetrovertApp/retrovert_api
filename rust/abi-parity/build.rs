@@ -17,10 +17,7 @@ const HEADERS: &[&str] = &[
 ];
 
 fn main() {
-    let include = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../include")
-        .canonicalize()
-        .expect("include/ not found beside the crate");
+    let include = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../include");
 
     let mut source = String::new();
     for header in HEADERS {
@@ -32,7 +29,8 @@ fn main() {
 
     let bindings = bindgen::Builder::default()
         .header_contents("rv_abi.h", &source)
-        .clang_arg(format!("-I{}", include.display()))
+        .clang_arg("-I")
+        .clang_arg(include.to_string_lossy().into_owned())
         .allowlist_type("RV.*")
         .allowlist_var("RV.*")
         .default_enum_style(bindgen::EnumVariation::Consts)
