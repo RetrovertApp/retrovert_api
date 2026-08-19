@@ -529,9 +529,30 @@ fn open_library(path: &Path) -> Result<Library, libloading::Error> {
     unsafe { UnixLibrary::open(Some(path), RTLD_NOW | RTLD_LOCAL) }.map(Library::from)
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
 fn open_library(path: &Path) -> Result<Library, libloading::Error> {
-    // SAFETY: as the unix arm above; `LoadLibrary` already binds eagerly.
+    use libloading::os::windows::{
+        Library as WindowsLibrary, LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR, LOAD_LIBRARY_SEARCH_SYSTEM32,
+    };
+
+    // The release policy's hardened search path, unconditionally: a plugin's
+    // dependent DLLs resolve from its own directory and System32, never from
+    // the process directory or PATH. The search flags require a fully
+    // qualified name, so a relative path is absolutized first.
+    let path = std::path::absolute(path).unwrap_or_else(|_| path.to_owned());
+    // SAFETY: as the unix arm above; `LoadLibraryExW` already binds eagerly.
+    unsafe {
+        WindowsLibrary::load_with_flags(
+            path,
+            LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32,
+        )
+    }
+    .map(Library::from)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn open_library(path: &Path) -> Result<Library, libloading::Error> {
+    // SAFETY: as the unix arm above; loading binds eagerly on this platform.
     unsafe { Library::new(path) }
 }
 
