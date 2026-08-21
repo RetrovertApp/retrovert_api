@@ -72,6 +72,13 @@ fn canonical_signature(name: &str) -> String {
     ] {
         name = name.replace(opaque, "core::ffi::c_void");
     }
+    // MSVC lowers C enums to i32 where clang/gcc pick u32, so enum-returning
+    // slots differ only in signedness there. Same size and ABI; the non-Windows
+    // jobs keep the strict comparison.
+    #[cfg(windows)]
+    {
+        name = name.replace("-> i32", "-> u32");
+    }
     name
 }
 
