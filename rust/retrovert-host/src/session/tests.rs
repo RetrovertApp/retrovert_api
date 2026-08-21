@@ -68,6 +68,7 @@ thread_local! {
     static CALLS: RefCell<Vec<Call>> = const { RefCell::new(Vec::new()) };
     static EVENTS: RefCell<Vec<&'static str>> = const { RefCell::new(Vec::new()) };
     static RAMP: RefCell<Option<Ramp>> = const { RefCell::new(None) };
+    static FILL_NEXT: RefCell<u32> = const { RefCell::new(0) };
     static OPEN_RESULT: RefCell<i32> = const { RefCell::new(0) };
     static SETTINGS_RESULT: RefCell<u32> = const { RefCell::new(0) };
     static METADATA_RESULT: RefCell<i32> = const { RefCell::new(0) };
@@ -83,6 +84,7 @@ thread_local! {
 fn script(responses: Vec<Response>) {
     RESPONSES.with_borrow_mut(|slot| *slot = responses);
     RAMP.with_borrow_mut(|slot| *slot = None);
+    FILL_NEXT.with_borrow_mut(|slot| *slot = 0);
     CALLS.with_borrow_mut(Vec::clear);
     EVENTS.with_borrow_mut(Vec::clear);
     OPEN_RESULT.with_borrow_mut(|slot| *slot = 0);
@@ -275,12 +277,10 @@ unsafe extern "C" fn stub_read_data(_user_data: *mut c_void, dest: RVReadData) -
         }
     });
 
-    let count = response
-        .bytes
-        .len()
-        .min(dest.channels_output_max_bytes_size as usize);
-    // SAFETY: the host advertised `channels_output_max_bytes_size` writable bytes at
-    // `channels_output`, and no more than that many are written.
+    // Cap at the reserved storage (widest stereo frame), not the narrower advertisement.
+    let reserved = dest.info.frame_count as usize * 2 * core::mem::size_of::<f32>();
+    let count = response.bytes.len().min(reserved);
+    // SAFETY: the host reserves `reserved` writable bytes at `channels_output`.
     unsafe {
         core::ptr::copy_nonoverlapping(
             response.bytes.as_ptr(),
@@ -297,6 +297,56 @@ unsafe extern "C" fn stub_read_data(_user_data: *mut c_void, dest: RVReadData) -
         },
         frame_count: response.frames,
         status: response.status,
+    }
+}
+
+/// The legacy C-host convention: ignore the requested frame count, fill the advertised
+/// byte capacity in the `LAST_FORMAT` native format, and report what that came to.
+unsafe extern "C" fn capacity_filling_read_data(
+    _user_data: *mut c_void,
+    dest: RVReadData,
+) -> RVReadInfo {
+    CALLS.with_borrow_mut(|calls| {
+        calls.push(Call {
+            max_bytes: dest.channels_output_max_bytes_size,
+            frames: dest.info.frame_count,
+            hint: dest.info.format,
+            status: dest.info.status,
+        })
+    });
+    let format = LAST_FORMAT.with_borrow(|format| *format);
+    let width = RVAudioStreamFormat::from_raw(format.audio_format)
+        .map(convert::sample_width)
+        .expect("fixture format");
+    let channels = format.channel_count as usize;
+    let frames = dest.channels_output_max_bytes_size as usize / (width * channels);
+    let samples = frames * channels;
+    let out = dest.channels_output.cast::<u8>();
+    FILL_NEXT.with_borrow_mut(|next| {
+        for index in 0..samples {
+            let value = *next;
+            *next += 1;
+            // SAFETY: `samples * width` never exceeds the advertised capacity.
+            unsafe {
+                match RVAudioStreamFormat::from_raw(format.audio_format).expect("fixture format") {
+                    RVAudioStreamFormat::U8 => *out.add(index) = 128 + value as u8,
+                    RVAudioStreamFormat::S16 => out
+                        .add(index * 2)
+                        .cast::<i16>()
+                        .write_unaligned(value as i16),
+                    RVAudioStreamFormat::F32 => out
+                        .add(index * 4)
+                        .cast::<f32>()
+                        .write_unaligned(value as f32),
+                    other => panic!("unsupported fixture format {other:?}"),
+                }
+            }
+        }
+    });
+    RVReadInfo {
+        format,
+        frame_count: frames as u32,
+        status: RVReadStatus::Ok as u32,
     }
 }
 
@@ -898,7 +948,90 @@ fn the_read_hint_carries_the_default_when_no_target_is_set() {
     assert_eq!(call.hint.sample_rate, DEFAULT_HINT.sample_rate);
     assert_eq!(call.status, RVReadStatus::DecodingRequest as u32);
     assert_eq!(call.frames, 4);
-    assert_eq!(call.max_bytes, 4 * 2 * 4);
+    // One byte per frame until the first chunk locks the format.
+    assert_eq!(call.max_bytes, 4);
+}
+
+/// Runs `body` against a prepared player over a capacity-filling plugin in `native`.
+fn with_capacity_filling_player<R>(
+    native: RVAudioFormat,
+    budget: u32,
+    body: impl FnOnce(&mut PreparedPlayer<'_>) -> R,
+) -> R {
+    script(Vec::new());
+    LAST_FORMAT.with_borrow_mut(|format| *format = native);
+    let mut descriptor = descriptor();
+    descriptor.read_data = Some(capacity_filling_read_data);
+    with_descriptor(descriptor, |plugin| {
+        let player = plugin.open("song.mod", 0).expect("open");
+        let mut player = player.prepare(budget).expect("prepare");
+        body(&mut player)
+    })
+}
+
+#[test]
+fn a_capacity_filling_s16_stereo_plugin_stays_within_the_request() {
+    let native = RVAudioFormat {
+        audio_format: RVAudioStreamFormat::S16 as u32,
+        channel_count: 2,
+        sample_rate: 44_100,
+    };
+    with_capacity_filling_player(native, 8, |player| {
+        let chunk = player.read(8).expect("read");
+        assert_eq!(chunk.frames(), 8);
+        assert_eq!(
+            chunk.format,
+            StreamFormat {
+                sample_rate: 44_100,
+                channels: 2
+            }
+        );
+        let expected: Vec<f32> = (0..16).map(|n| n as f32 / 32_768.0).collect();
+        assert_eq!(chunk.samples, expected);
+        assert!(!chunk.finished);
+    });
+    // One byte per frame pre-lock, then exact locked-frame bytes.
+    let calls = calls();
+    assert_eq!(calls.len(), 2);
+    assert_eq!((calls[0].frames, calls[0].max_bytes), (8, 8));
+    assert_eq!((calls[1].frames, calls[1].max_bytes), (6, 24));
+}
+
+#[test]
+fn a_capacity_filling_u8_mono_plugin_answers_the_request_exactly() {
+    let native = RVAudioFormat {
+        audio_format: RVAudioStreamFormat::U8 as u32,
+        channel_count: 1,
+        sample_rate: 11_025,
+    };
+    with_capacity_filling_player(native, 8, |player| {
+        let chunk = player.read(8).expect("read");
+        assert_eq!(chunk.frames(), 8);
+        let expected: Vec<f32> = (0..8).map(|n| n as f32 / 128.0).collect();
+        assert_eq!(chunk.samples, expected);
+    });
+    let calls = calls();
+    assert_eq!(calls.len(), 1);
+    assert_eq!((calls[0].frames, calls[0].max_bytes), (8, 8));
+}
+
+#[test]
+fn a_capacity_filling_f32_stereo_plugin_tops_up_after_the_lock() {
+    let native = RVAudioFormat {
+        audio_format: RVAudioStreamFormat::F32 as u32,
+        channel_count: 2,
+        sample_rate: 48_000,
+    };
+    with_capacity_filling_player(native, 8, |player| {
+        let chunk = player.read(8).expect("read");
+        assert_eq!(chunk.frames(), 8);
+        let expected: Vec<f32> = (0..16).map(|n| n as f32).collect();
+        assert_eq!(chunk.samples, expected);
+    });
+    let calls = calls();
+    assert_eq!(calls.len(), 2);
+    assert_eq!((calls[0].frames, calls[0].max_bytes), (8, 8));
+    assert_eq!((calls[1].frames, calls[1].max_bytes), (7, 56));
 }
 
 #[test]

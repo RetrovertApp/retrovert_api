@@ -425,7 +425,100 @@ fn a_c_plugin_plays_through_the_session() {
     );
 
     let lines = captured.lines.lock().expect("log lines");
-    assert_eq!(lines.as_slice(), ["read 3 frames"]);
+    // The pre-lock pull advertises one byte per frame, so the first read pulls twice.
+    assert_eq!(lines.as_slice(), ["read 3 frames", "read 2 frames"]);
+}
+
+/// A legacy plugin that ignores the requested frame count and fills the advertised byte
+/// capacity with S16 stereo, the convention every pre-contract C plugin was written to.
+const CAPACITY_FILLING_FIXTURE: &str = r#"
+#include <stdlib.h>
+
+#include <retrovert/playback.h>
+
+typedef struct Instance {
+    int16_t next;
+} Instance;
+
+static void* create(const RVService* services) {
+    (void)services;
+    return calloc(1, sizeof(Instance));
+}
+
+static int32_t destroy(void* user_data) {
+    free(user_data);
+    return 0;
+}
+
+static int32_t open_song(void* user_data, const char* url, uint32_t subsong, const RVService* services) {
+    (void)user_data; (void)url; (void)subsong; (void)services;
+    return 0;
+}
+
+static void close_song(void* user_data) { (void)user_data; }
+
+static RVReadInfo read_data(void* user_data, RVReadData dest) {
+    Instance* instance = (Instance*)user_data;
+    uint32_t frames = dest.channels_output_max_bytes_size / (sizeof(int16_t) * 2);
+    int16_t* out = (int16_t*)dest.channels_output;
+    for (uint32_t i = 0; i < frames; i++) {
+        out[i * 2] = instance->next;
+        out[i * 2 + 1] = instance->next;
+        instance->next++;
+    }
+
+    RVReadInfo info;
+    info.format.audio_format = RVAudioStreamFormat_S16;
+    info.format.channel_count = 2;
+    info.format.sample_rate = 44100;
+    info.frame_count = frames;
+    info.status = RVReadStatus_Ok;
+    return info;
+}
+
+static RVPlaybackPlugin plugin = {
+    .api_version = RV_PLAYBACK_PLUGIN_API_VERSION,
+    .name = "capacity_filler", .version = "1.0", .library_version = "1.0",
+    .create = create, .destroy = destroy,
+    .open = open_song, .close = close_song, .read_data = read_data,
+};
+
+RVPlaybackPlugin* rv_playback_plugin(void) { return &plugin; }
+"#;
+
+#[test]
+fn a_capacity_filling_c_plugin_decodes_the_full_budget() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    compile(
+        dir.path(),
+        "capacity_filling_fixture",
+        CAPACITY_FILLING_FIXTURE,
+    );
+    let mut report = load_test_plugins([dir.path()]);
+    assert!(report.errors.is_empty(), "{:?}", report.errors);
+    let loaded = playback(&mut report);
+
+    let host = host(Arc::new(CapturingLog::default()));
+    let plugin = test_plugin(loaded, &host);
+    let mut player = plugin
+        .open("song.mod", 0)
+        .expect("open")
+        .prepare(1_024)
+        .expect("prepare");
+
+    for _ in 0..2 {
+        let chunk = player.read(1_024).expect("read");
+        assert_eq!(chunk.frames(), 1_024);
+        assert!(!chunk.finished);
+    }
+    assert_eq!(
+        player.native_format().expect("locked"),
+        FormatLock {
+            sample_format: RVAudioStreamFormat::S16,
+            sample_rate: 44_100,
+            channels: 2,
+        }
+    );
 }
 
 #[test]

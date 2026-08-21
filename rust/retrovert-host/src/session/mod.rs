@@ -1018,13 +1018,21 @@ impl<'a> Player<'a> {
         while produced < budget && !self.finished {
             let request = self.source_frames(budget - produced);
 
-            let info = self.pull(request);
+            let info = self.pull(request, self.advertised_bytes(request));
             let (returned, format, finished) = self.validate(info, request)?;
-            if self.lock.is_none() {
+            let unlocked = self.lock.is_none();
+            if unlocked {
                 self.start(format)?;
             }
             self.finished |= finished;
             if returned == 0 {
+                // Retry when the pre-lock advertisement was too small for one frame of
+                // the now-locked format; the next pull advertises exact frame bytes.
+                let frame_bytes =
+                    format.channels as usize * convert::sample_width(format.sample_format);
+                if unlocked && !finished && request < frame_bytes {
+                    continue;
+                }
                 break;
             }
             produced += self.consume(returned, produced);
@@ -1076,13 +1084,25 @@ impl<'a> Player<'a> {
         }
     }
 
+    /// Bytes to advertise for a `request`-frame pull. Capacity-filling plugins turn every
+    /// advertised byte into frames, so this never holds more frames than the request:
+    /// exactly what the locked format occupies, or one byte per frame (U8 mono) before it.
+    fn advertised_bytes(&self, request: usize) -> usize {
+        match self.lock {
+            Some(lock) => {
+                request * lock.channels as usize * convert::sample_width(lock.sample_format)
+            }
+            None => request,
+        }
+    }
+
     /// Asks the plugin for `request` frames, hinting at the format we would rather have.
     /// The hint is not binding: whatever comes back is normalized.
-    fn pull(&mut self, request: usize) -> RVReadInfo {
+    fn pull(&mut self, request: usize, capacity: usize) -> RVReadInfo {
         let hint = self.target.unwrap_or(DEFAULT_HINT);
         let data = RVReadData {
             channels_output: self.buffers.raw.as_mut_ptr().cast(),
-            channels_output_max_bytes_size: advertised_bytes(request) as u32,
+            channels_output_max_bytes_size: capacity as u32,
             info: RVReadInfo {
                 format: RVAudioFormat {
                     audio_format: RVAudioStreamFormat::F32 as u32,
@@ -1114,13 +1134,11 @@ impl<'a> Player<'a> {
         let sample_format = RVAudioStreamFormat::from_raw(info.format.audio_format)
             .ok_or(AbiViolation::UnknownSampleFormat(info.format.audio_format))?;
 
-        // Judged first, and against the bytes the plugin was actually handed: whether the
-        // frame count fits the request is a narrower question than whether the audio it
-        // claims fits the buffer.
+        // Judged against reserved storage, not the possibly narrower advertisement.
         let needed = (info.frame_count as usize)
             .saturating_mul(info.format.channel_count as usize)
             .saturating_mul(convert::sample_width(sample_format));
-        let available = advertised_bytes(requested);
+        let available = reserved_bytes(requested);
         if needed > available {
             return Err(AbiViolation::BufferOverrun { needed, available }.into());
         }
@@ -1371,9 +1389,9 @@ fn grow<T: Copy + Default>(
     Ok(())
 }
 
-/// Bytes the plugin is told it may write for `frames` frames: the widest it may answer
-/// with. Both the promise and the check that holds the plugin to it read it from here.
-fn advertised_bytes(frames: usize) -> usize {
+/// Bytes reserved behind a `frames`-frame pull: the widest answer the ABI allows.
+/// [`Player::advertised_bytes`] may promise less; overrun claims are judged against this.
+fn reserved_bytes(frames: usize) -> usize {
     frames * MAX_NATIVE_CHANNELS as usize * MAX_SAMPLE_WIDTH
 }
 
