@@ -125,7 +125,9 @@ macro_rules! values {
         $(
             $covered.mark(stringify!($c));
             assert_eq!(i128::from($name::$variant as u32), i128::from(c::$c), stringify!($c));
-            assert_eq!($name::from_raw(c::$c), Some($name::$variant), stringify!($c));
+            // The constant is i32 under MSVC and u32 elsewhere; the i128 check
+            // above already proves the value fits, so the cast is lossless.
+            assert_eq!($name::from_raw(c::$c as u32), Some($name::$variant), stringify!($c));
         )*
     }};
 }
@@ -136,7 +138,7 @@ macro_rules! bits {
         $covered.mark(stringify!($name));
         $(
             $covered.mark(stringify!($c));
-            assert_eq!($name::$konst, c::$c, stringify!($c));
+            assert_eq!(i128::from($name::$konst), i128::from(c::$c), stringify!($c));
         )*
     }};
 }
