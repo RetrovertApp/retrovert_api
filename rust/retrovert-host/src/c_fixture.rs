@@ -4,10 +4,11 @@ use std::path::{Path, PathBuf};
 
 /// `include/` beside the crate, so fixtures build against the real headers.
 fn include_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../include")
-        .canonicalize()
-        .expect("include/ not found beside the crate")
+    // Not canonicalized: on Windows that yields a \\?\ path, which cl.exe
+    // rejects in /I. CARGO_MANIFEST_DIR is already absolute.
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../include");
+    assert!(dir.is_dir(), "include/ not found beside the crate");
+    dir
 }
 
 pub(crate) fn compile(dir: &Path, stem: &str, source: &str) -> PathBuf {
