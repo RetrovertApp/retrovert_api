@@ -29,6 +29,16 @@ impl Resampler {
         }
     }
 
+    /// Drops the cross-block state so the next block starts a new signal.
+    ///
+    /// A seek makes the previous block's last frame the wrong thing to interpolate
+    /// from: the source jumped, so nothing precedes the next block.
+    pub(crate) fn reset(&mut self) {
+        self.position = 0.0;
+        self.prev_frame = [0.0; MAX_CHANNELS];
+        self.has_prev = false;
+    }
+
     /// Source frames to ask for to produce `wanted` output frames.
     ///
     /// The scaling and its `+ 2` are the C player's, kept so a request tracks the rate
@@ -172,6 +182,19 @@ mod tests {
         // 3.0 the new block's first.
         let produced = resampler.process(&[3.0, 4.0], 2, &mut dst, 8);
         assert_eq!(&dst[..produced], [1.0, 2.0, 3.0, 3.5]);
+    }
+
+    #[test]
+    fn a_reset_leaves_no_frame_for_the_next_block_to_lean_on() {
+        let mut resampler = Resampler::new(24_000, 48_000, 1);
+        let mut dst = [0.0; 8];
+
+        let produced = resampler.process(&[0.0, 1.0], 2, &mut dst, 8);
+        assert_eq!(&dst[..produced], [0.0, 0.5]);
+        // Without the reset this block would open on 1.0, the frame the seek left.
+        resampler.reset();
+        let produced = resampler.process(&[3.0, 4.0], 2, &mut dst, 8);
+        assert_eq!(&dst[..produced], [3.0, 3.5]);
     }
 
     #[test]

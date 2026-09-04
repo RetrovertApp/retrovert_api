@@ -70,6 +70,10 @@ thread_local! {
     static RAMP: RefCell<Option<Ramp>> = const { RefCell::new(None) };
     static FILL_NEXT: RefCell<u32> = const { RefCell::new(0) };
     static OPEN_RESULT: RefCell<i32> = const { RefCell::new(0) };
+    /// What `seek` answers: `None` echoes the request back, the way a plugin that
+    /// landed where it was asked does.
+    static SEEK_RESULT: RefCell<Option<i64>> = const { RefCell::new(None) };
+    static SEEKS: RefCell<Vec<i64>> = const { RefCell::new(Vec::new()) };
     static SETTINGS_RESULT: RefCell<u32> = const { RefCell::new(0) };
     static METADATA_RESULT: RefCell<i32> = const { RefCell::new(0) };
     static LAST_FORMAT: RefCell<RVAudioFormat> = const {
@@ -88,6 +92,8 @@ fn script(responses: Vec<Response>) {
     CALLS.with_borrow_mut(Vec::clear);
     EVENTS.with_borrow_mut(Vec::clear);
     OPEN_RESULT.with_borrow_mut(|slot| *slot = 0);
+    SEEK_RESULT.with_borrow_mut(|slot| *slot = None);
+    SEEKS.with_borrow_mut(Vec::clear);
     METADATA_RESULT.with_borrow_mut(|slot| *slot = 0);
 }
 
@@ -103,6 +109,16 @@ fn script_ramp(sample_rate: u32) {
 
 fn calls() -> Vec<Call> {
     CALLS.with_borrow(Clone::clone)
+}
+
+/// The positions `seek` was asked for, in order.
+fn seeks() -> Vec<i64> {
+    SEEKS.with_borrow(Clone::clone)
+}
+
+/// Makes the next seeks answer `reached` instead of echoing the request.
+fn seek_reaches(reached: i64) {
+    SEEK_RESULT.with_borrow_mut(|slot| *slot = Some(reached));
 }
 
 fn events() -> Vec<&'static str> {
@@ -370,6 +386,11 @@ unsafe extern "C" fn allocation_free_read_data(
     }
 }
 
+unsafe extern "C" fn stub_seek(_user_data: *mut c_void, ms: i64) -> i64 {
+    SEEKS.with_borrow_mut(|seeks| seeks.push(ms));
+    SEEK_RESULT.with_borrow(|reached| reached.unwrap_or(ms))
+}
+
 fn descriptor() -> RVPlaybackPlugin {
     // SAFETY: every field is a nullable pointer, an `Option<fn>` or an integer, and the
     // zero pattern is the null / `None` / zero case for all of them.
@@ -386,6 +407,7 @@ fn descriptor() -> RVPlaybackPlugin {
     plugin.metadata = Some(stub_metadata);
     plugin.viz_info = Some(stub_viz_info);
     plugin.scope_enable = Some(stub_scope_enable);
+    plugin.seek = Some(stub_seek);
     plugin
 }
 
@@ -526,8 +548,18 @@ fn with_player<R>(
     target: Option<StreamFormat>,
     body: impl FnOnce(&mut PreparedPlayer<'_>) -> R,
 ) -> R {
+    with_player_over(descriptor(), responses, target, body)
+}
+
+/// The same, for a fixture that leaves a callback out.
+fn with_player_over<R>(
+    descriptor: RVPlaybackPlugin,
+    responses: Vec<Response>,
+    target: Option<StreamFormat>,
+    body: impl FnOnce(&mut PreparedPlayer<'_>) -> R,
+) -> R {
     script(responses);
-    with_plugin(|plugin| {
+    with_descriptor(descriptor, |plugin| {
         let player = match target {
             Some(target) => plugin
                 .open_with_target("song.mod", 0, target)
@@ -1578,4 +1610,119 @@ fn buffer_allocation_failure_is_reported() {
         grow(&mut buffer, usize::MAX, "test"),
         Err(SessionError::Allocation("test"))
     );
+}
+
+#[test]
+fn a_seek_reports_where_the_plugin_landed() {
+    with_player(
+        vec![Response::f32(&[0.1, 0.2], 1, 48_000)],
+        None,
+        |player| {
+            assert_eq!(player.seek(2_500), Some(2_500));
+        },
+    );
+    assert_eq!(seeks(), [2_500]);
+}
+
+#[test]
+fn a_seek_before_the_start_asks_for_the_start() {
+    with_player(
+        vec![Response::f32(&[0.1, 0.2], 1, 48_000)],
+        None,
+        |player| {
+            assert_eq!(player.seek(-4_000), Some(0));
+        },
+    );
+    assert_eq!(seeks(), [0]);
+}
+
+#[test]
+fn a_plugin_reporting_a_negative_position_refused_the_seek() {
+    with_player(
+        vec![Response::f32(&[0.1, 0.2], 1, 48_000)],
+        None,
+        |player| {
+            seek_reaches(-1);
+            assert_eq!(player.seek(2_500), None);
+        },
+    );
+}
+
+#[test]
+fn a_plugin_without_the_callback_cannot_seek() {
+    let mut without_seek = descriptor();
+    without_seek.seek = None;
+    with_player_over(without_seek, Vec::new(), None, |player| {
+        assert_eq!(player.seek(2_500), None);
+    });
+    assert_eq!(seeks(), [] as [i64; 0]);
+}
+
+#[test]
+fn a_seek_lets_a_finished_song_play_on() {
+    with_player(
+        vec![
+            Response::f32(&[0.1, 0.2], 1, 48_000).finished(),
+            Response::f32(&[0.3, 0.4], 1, 48_000),
+        ],
+        None,
+        |player| {
+            let chunk = player.read(2).expect("read");
+            assert_eq!(chunk.samples, [0.1, 0.2]);
+            assert!(chunk.finished);
+            assert_eq!(player.read(2).expect("read").frames(), 0);
+
+            assert_eq!(player.seek(0), Some(0));
+            let chunk = player.read(2).expect("read");
+            assert_eq!(chunk.samples, [0.3, 0.4]);
+            assert!(!chunk.finished);
+        },
+    );
+}
+
+#[test]
+fn a_seek_drops_the_frames_decoded_before_it() {
+    script_ramp(8_000);
+    let target = StreamFormat {
+        sample_rate: 48_000,
+        channels: 1,
+    };
+    with_plugin(|plugin| {
+        let mut player = plugin
+            .open_with_target("song.mod", 0, target)
+            .expect("open")
+            .prepare(4)
+            .expect("prepare");
+        assert_eq!(player.read(4).expect("read").frames(), 4);
+        // One pull covered several reads; the carry it left describes where the song
+        // was, so the read after a seek has to go back to the plugin for more.
+        assert_eq!(calls().len(), 1);
+
+        assert_eq!(player.seek(10_000), Some(10_000));
+        assert_eq!(player.read(4).expect("read").frames(), 4);
+        assert_eq!(calls().len(), 2, "the stale carry was served instead");
+    });
+}
+
+#[test]
+fn a_refused_seek_keeps_the_frames_decoded_before_it() {
+    script_ramp(8_000);
+    let target = StreamFormat {
+        sample_rate: 48_000,
+        channels: 1,
+    };
+    with_plugin(|plugin| {
+        let mut player = plugin
+            .open_with_target("song.mod", 0, target)
+            .expect("open")
+            .prepare(4)
+            .expect("prepare");
+        assert_eq!(player.read(4).expect("read").frames(), 4);
+        assert_eq!(calls().len(), 1);
+
+        seek_reaches(-1);
+        assert_eq!(player.seek(10_000), None);
+        assert_eq!(player.read(4).expect("read").frames(), 4);
+        assert_eq!(calls().len(), 1, "a refused seek disturbed the carry");
+    });
 }

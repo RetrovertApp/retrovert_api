@@ -754,6 +754,14 @@ impl OwnedPreparedSession {
         self.player.capture_visualization(output_frame, snapshot)
     }
 
+    /// Moves the playhead to `position_ms`, reporting the position the plugin reached.
+    ///
+    /// Returns `None` when the plugin cannot seek or refuses the request, leaving the
+    /// session untouched.
+    pub fn seek(&mut self, position_ms: i64) -> Option<i64> {
+        self.player.seek(position_ms)
+    }
+
     /// Enables or disables scope capture when the plugin supports it.
     pub fn set_scope_enabled(&mut self, enabled: bool) {
         self.player.set_scope_enabled(enabled);
@@ -972,6 +980,31 @@ impl<'a> Player<'a> {
             // SAFETY: the instance belongs to this plugin and the call is serialized with reads.
             unsafe { scope_enable(self.instance.as_ptr(), enabled) };
         }
+    }
+
+    /// Moves the playhead to `position_ms`, reporting the position the plugin reached.
+    ///
+    /// Returns `None` when the plugin exposes no seek callback, or when it refuses the
+    /// request by reporting a negative position. A refused seek disturbs nothing: the
+    /// next read continues where the last one stopped.
+    ///
+    /// A reached seek drops what the last read left over and the resampler's
+    /// cross-block state, since both describe a place the song has just left, and
+    /// clears the finished flag — the song has somewhere to go again.
+    pub fn seek(&mut self, position_ms: i64) -> Option<i64> {
+        let seek = self.plugin.seek?;
+        // SAFETY: the instance belongs to this plugin and the call is serialized with reads.
+        let reached = unsafe { seek(self.instance.as_ptr(), position_ms.max(0)) };
+        if reached < 0 {
+            return None;
+        }
+        self.carry = 0;
+        self.carry_at = 0;
+        self.finished = false;
+        if let Some(resampler) = self.resampler.as_mut() {
+            resampler.reset();
+        }
+        Some(reached)
     }
 
     /// What the plugin locked to, once it has produced a chunk.
