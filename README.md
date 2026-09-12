@@ -9,8 +9,12 @@ API for Retrovert
   repository for Cargo Git dependencies. It is intentionally not published to crates.io.
 - `rust/abi-parity/` — bindgen gate asserting the crate's `#[repr(C)]` mirror matches
   the headers. Kept out of `retrovert-host` so consumers never build bindgen.
-- `ci/build.yml` — CMake workflow template copied into playback plugin repositories by
-  `update-api-headers.sh`; this repository's Rust checks live in `.github/workflows/`.
+
+Fanning the contract out to the plugin repositories is the aggregate's job: run
+`scripts/update-api-headers.sh <this checkout>` from
+[playback_plugins](https://github.com/RetrovertApp/playback_plugins), which owns the vendored
+copies and the plugins' CMake CI template. This repository's own Rust checks live in
+`.github/workflows/`.
 
 Changes to decode, visualization, settings, or FFI code must follow the
 [runtime contract](docs/runtime-contract.md). Its steady-state requirements are tested by

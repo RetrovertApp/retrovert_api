@@ -1,2 +1,0 @@
-# Keep patch files with LF line endings (git apply breaks with CRLF)
-*.patch binary
